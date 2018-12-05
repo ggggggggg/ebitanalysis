@@ -218,7 +218,77 @@ class WorstSpectra():
     def chisqspectrumcompare(self,normcounts1,normcounts2): return  np.sum((normcounts1-normcounts2)**2)/len(normcounts1)
     def normalizespectrum(self,counts): return counts/(1.0*counts.sum())
 
+import fastdtw
+class WorstSpectraDTW():
+    """
+    Create this, then run this.plot() to get a plot ordered by how well the spectra align.
+    this.channels_sorted_by_chisq is a list of channel number, the last elements are the "worst spectra" in that they look the least
+    like the others
+    this.chisqdict maps channel number to chisq, chisq is a measure of how "bad" the spectra is (mean sum of squares between normalized spectrum and normalized mean spectrum)
+    this.output() prints out the worst spectra
+    INPUTS
+    data -- A TESChannelGroup
+    bin_edges, attr, category -- passed on to data.hists
+    """
+    def __init__(self,data, bin_edges = np.arange(2000,10000),attr="p_energy",category={}):
+        self.data = data
+        self.attr = attr
+        self.category = category
+        self.bin_edges = bin_edges
+        self.doit()
 
+    def doit(self):
+        self.bin_centers, self.countsdict = self.data.hists(bin_edges=self.bin_edges, category=self.category, attr=self.attr)
+        self.chisqdict = self.rank_hists_chisq(self.countsdict)
+        self.channels_sorted_by_chisq = self.keys_sorted_by_value(self.chisqdict)
+
+    def output(self):
+        print(self.worstn(len(self.channels_sorted_by_chisq),"\n"))
+
+    def worstn(self,n,seperator=", "):
+        n = min(n, len(self.channels_sorted_by_chisq))
+        s=""
+        for i in range(n):
+            ch = self.channels_sorted_by_chisq[-(i+1)]
+            s+="%g:%0.3e"%(ch,self.chisqdict[ch])+seperator
+        return s
+
+    def bestn(self,n,seperator=", "):
+        n = min(n, len(self.channels_sorted_by_chisq))
+        s=""
+        for i in range(n):
+            ch = self.channels_sorted_by_chisq[i]
+            s+="%g:%0.3e"%(ch,self.chisqdict[ch])+seperator
+        return s
+
+    def plot(self):
+        plt.figure(figsize=(10,5))
+        offsetsize = 10*np.mean(self.normalizespectrum(self.countsdict[self.channels_sorted_by_chisq[0]]))
+        for i,ch in enumerate(self.channels_sorted_by_chisq):
+            plt.plot(self.bin_centers, offsetsize*i+self.normalizespectrum(self.countsdict[ch]), drawstyle="steps-mid",label=ch)
+            plt.annotate("%g"%ch,(self.bin_centers[-1],offsetsize*i),xycoords="data")
+        plt.xlabel(self.attr)
+        plt.ylabel("normalized counts per bin (sum=1), arb offset")
+        plt.annotate("worst "+self.worstn(5),(0.1,0.9), xycoords="axes fraction")
+        plt.annotate("best  "+self.bestn(5),(0.1,0.85), xycoords="axes fraction")
+
+
+    def keys_sorted_by_value(self,d): return np.array([k for k, v in sorted(d.iteritems(), key=lambda (k,v): (v,k))])
+
+    def rank_hists_chisq(self,countsdict):
+        """Return chisqdict which maps channel number to chisq value. keys_sorted_by_value(chisqdict) may be useful.
+        countsdict -- a dictionary mapping channel number to np arrays containing counts per bin
+        """
+        sumspectrum = np.zeros_like(countsdict.values()[0], dtype="int")
+        for k,v in countsdict.items():
+            sumspectrum+=v
+        #normalize spectra
+        normalizedsumspectrum = self.normalizespectrum(sumspectrum)
+        chisqdict =  {ch:self.chisqspectrumcompare(self.normalizespectrum(spect),normalizedsumspectrum) for ch,spect in self.countsdict.items()}
+        return chisqdict
+
+    def chisqspectrumcompare(self,normcounts1,normcounts2): return  fastdtw.fastdtw(normcounts1,normcounts2)[0]
+    def normalizespectrum(self,counts): return counts/(1.0*counts.sum())
 
 # def normalizespectrum(counts): return counts/(1.0*counts.sum())
 # def chisqspectrumcompare(normcounts1,normcounts2): return  np.sum((normcounts1-normcounts2)**2)/len(normcounts1)

@@ -66,7 +66,7 @@ plt.title(data.shortname()+", after excluding worst spectra")
 
 
 data.plot_hist(np.arange(2200),"p_energy",
-label_lines=["SiKAlpha","AlKAlpha","MgKAlpha","FeLAlpha","OKAlpha","NiLAlpha","CoLAlpha","CuLAlpha","ZnLAlpha","ZnLBeta","AlKBeta","MgKBeta","CKAlpha","NKAlpha"])
+label_lines=["OKAlpha",1022])
 plt.xlabel("energy (eV)")
 plt.ylabel("counts per bin")
 plt.yscale("log")
