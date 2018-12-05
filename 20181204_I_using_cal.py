@@ -81,7 +81,11 @@ plt.ylabel("pretrigger mean (arb)")
 
 # data.linefit("AlKAlpha")
 
-with h5py.File("hists/"+data.shortname()+".h5","w") as h5:
+with h5py.File("hists/"+data.shortname()+"_prelim.h5","w") as h5:
     bin_centers, counts = data.hist(np.arange(4000))
     h5["bin_centers"]=bin_centers
     h5["counts"]=counts
+
+np.savetxt("hists/"+data.shortname()+"_prelim.yuri",
+np.vstack((bin_centers,counts)).T,
+header="#bin_centers (eV), counts")
