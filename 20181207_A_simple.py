@@ -16,8 +16,8 @@ import time
 import fastdtw
 import scipy
 
-dirname = "/data/20181204_E"
-ndirname = "/data/20181204_F"
+dirname = "/data/20181207_A"
+ndirname = "/data/20181207_B"
 maxChans = 244
 delete_hdf5_file_before_analysis = False
 
@@ -43,15 +43,18 @@ data.filter_data(forceNew=False)
 data.drift_correct(forceNew=False)
 # data.phase_correct(forceNew=False)
 
-def cal_b_to_a(ds_a,ds_b,npeaks,attr="p_filt_value_dc",diagnose_plots=False):
-    bin_centers, counts_a = ds_a.hist(np.arange(0,16000,4),attr)
-    bin_centers, counts_b = ds_b.hist(np.arange(0,16000,4),attr)   
+def cal_b_to_a(ds_a,ds_b,npeaks,attr="p_filt_value_dc",diagnose_plots=False, bin_edges = np.arange(100,20000,4)):
+    bin_centers, counts_a = ds_a.hist(bin_edges,attr)
+    bin_centers, counts_b = ds_b.hist(bin_edges,attr)   
+    if counts_b.sum() < 100:
+        print("too few counts_b, sum=%g"%counts_b.sum())
+        return
     distance, path = fastdtw.fastdtw(counts_a, counts_b)
     i_a = np.array([x[0] for x in path])
     i_b = np.array([x[1] for x in path])
     cc = counts_a[i_a]*counts_b[i_b]
 
-    peaks_inds_cc, properties = scipy.signal.find_peaks(cc,prominence=2)
+    peaks_inds_cc, properties = scipy.signal.find_peaks(cc,prominence=4,distance=10)
     peakscounts = cc[peaks_inds_cc]
     peaks_inds_ccsorted = peaks_inds_cc[np.argsort(peakscounts)][::-1][:npeaks]
     peaks_inds_a = i_a[peaks_inds_ccsorted]
@@ -67,10 +70,10 @@ def cal_b_to_a(ds_a,ds_b,npeaks,attr="p_filt_value_dc",diagnose_plots=False):
     attr_b_in_a_units = cal_b_to_a(getattr(ds_b,attr))
     newattr = attr+"_ch%i"%ds_a.channum
     setattr(ds_b, newattr, attr_b_in_a_units)
-    ds.calibration[attr+"_to_"+newattr]=cal_b_to_a
+    ds_b.calibration[attr+"_to_"+newattr]=cal_b_to_a
 
 
-    bin_centers,counts_b_in_a_units = ds_b.hist(np.arange(0,16000,4),newattr)
+    bin_centers,counts_b_in_a_units = ds_b.hist(bin_edges,newattr)
 
     if diagnose_plots:
         # plt.figure()
@@ -94,50 +97,58 @@ def cal_b_to_a(ds_a,ds_b,npeaks,attr="p_filt_value_dc",diagnose_plots=False):
         plt.figure(figsize=(20,10))
         plt.plot(bin_centers,counts_a,label="channel %i"%ds_a.channum)
         plt.plot(bin_centers,counts_b_in_a_units,label="channel %i"%ds_b.channum)
+        plt.plot(bin_centers[peaks_inds_a],counts_a[peaks_inds_a],"s")
+        plt.plot(bin_centers[peaks_inds_a],counts_b_in_a_units[peaks_inds_a],"*")
         plt.xlabel(attr+" channel %i"%ds_a.channum)
         plt.ylabel("counts per %0.2f unit bin"%(bin_centers[1]-bin_centers[0]))
         plt.legend()
 
-def dtw_distance(ds_a,ds_b,bin_edges,attr="p_filt_value_dc"):
-    bin_centers, counts_a = ds_a.hist(bin_edges,attr)
-    bin_centers, counts_b = ds_b.hist(bin_edges,attr)   
-    distance, path = fastdtw.fastdtw(counts_a, counts_b)
-    return distance
-
-
 for ds in data:
-    cal_b_to_a(ds_a=data.channel[3],ds_b=ds,npeaks=7,diagnose_plots=False)
+    cal_b_to_a(ds_a=data.channel[3],ds_b=ds,npeaks=10,diagnose_plots=False)
 
-# goodchans = []
-# badchans = []
-# for ds in data:
-#     if ds.good().sum()<500:
-#         data.set_chan_bad(ds.channum,"<500 good counts")
-#     #modify each ds to have an attribute called ds.p_filt_value_dc_ch3 
-#     cal_b_to_a(ds_a=data.channel[3],ds_b=ds,npeaks=7,diagnose_plots=True)
-#     while True:
-#         v = raw_input("does this match look good?")
-#         if v == "y":
-#             goodchans.append(ds.channum)
-#             plt.close()
-#             break
-#         if v == "n":
-#             badchans.append(ds.channum)
-#             plt.close()
-#             break
-#         else:
-#             print("y or n")
-goodchans = [1, 3, 5, 7, 9, 11, 15, 19, 23, 25, 27, 31, 33, 37, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 65, 67, 73, 75, 77, 79, 81, 83, 85, 91, 93, 95, 97, 99, 101, 107, 109, 115, 117, 123, 125, 127, 129, 133, 135, 143, 149, 155, 157, 163, 167, 169, 173, 177, 183, 185, 191, 193, 195, 201, 203, 205, 209, 211, 215, 219, 221, 225, 227, 229, 231, 233, 235, 237, 239, 241, 247, 251, 253, 257, 261, 263, 267, 273, 275, 279, 281, 285, 287, 293, 297, 301, 305, 307, 311, 313, 315, 319, 321, 323, 325, 329, 335, 337, 341, 343, 353, 355, 361, 363, 367, 371]
-badchans = [13, 17, 21, 29, 35, 39, 41, 69, 71, 89, 103, 105, 111, 119, 121, 131, 141, 145, 147, 151, 153, 159, 161, 165, 175, 179, 181, 187, 197, 199, 207, 213, 217, 223, 243, 249, 255, 259, 269, 277, 283, 289, 291, 295, 299, 303, 309, 317, 327, 331, 333, 339, 345, 347, 349, 351, 357, 365, 369, 373, 375, 377, 379, 381]
+goodchans = []
+badchans = []
+for ds in data:
+    if ds.good().sum()<300:
+        data.set_chan_bad(ds.channum,"<300 good counts")
+    #modify each ds to have an attribute called ds.p_filt_value_dc_ch3 
+    cal_b_to_a(ds_a=data.channel[3],ds_b=ds,npeaks=10,diagnose_plots=True)
+    while True:
+        v = raw_input("does this match look good?")
+        if v == "y":
+            goodchans.append(ds.channum)
+            plt.close()
+            break
+        if v == "n":
+            badchans.append(ds.channum)
+            plt.close()
+            break
+        else:
+            print("y or n")
+
+goodchans = [3, 5, 7, 11, 13, 15, 17, 21, 23, 25, 27, 29, 31, 33, 37, 41, 43, 49, 53, 55, 59, 61, 65, 73, 75, 77, 79, 81, 83, 85, 89, 93, 95, 97, 99, 101, 105, 109, 117, 121, 123, 125, 127, 133, 135, 149, 153, 155, 159, 163, 165, 167, 173, 175, 177, 185, 191, 199, 201, 205, 211, 213, 215, 217, 219, 221, 223, 227, 229, 231, 235, 237, 239, 241, 247, 251, 253, 257, 259, 261, 263, 267, 273, 275, 279, 281, 285, 287, 291, 293, 299, 305, 307, 309, 313, 319, 321, 323, 325, 331, 335, 337, 339, 341, 343, 353, 355, 361, 365, 367, 371, 377]
+badchans = [1, 9, 19, 39, 45, 47, 51, 57, 67, 69, 71, 91, 103, 107, 111, 115, 119, 129, 131, 137, 141, 143, 145, 147, 151, 157, 161, 169, 179, 181, 183, 187, 193, 195, 197, 203, 207, 209, 225, 233, 249, 255, 269, 277, 283, 289, 295, 297, 301, 303, 311, 315, 327, 329, 363]
+
+cals = {5: (41691,41029),
+7:(38109,37596),
+9:(37518.5,36462)}
+
+bin_edges = np.arange(12800,13200,2)
+counts = np.zeros(len(bin_edges)-1)
+for (k,v) in cals.items():
+    cal = mass.EnergyCalibration()
+    cal.add_cal_point(v[0],13114.5)
+    cal.add_cal_point(v[1],12979.3)
+    ds = data.channel[k]
+    ds.p_energy[:] = cal(ds.p_filt_value_dc[:])
+    bin_centers, countsDS = ds.hist(bin_edges)
+    counts+=countsDS
+
+plt.plot(bin_centers, counts)
+
 
 for badchan in badchans:
     data.set_chan_bad(badchan,"manually marked bad when compared to channel 3")
-
-for ds in data:
-    ds.distance = dtw_distance(data.channel[3],ds,np.arange(0,16000,4),attr="p_filt_value_dc_ch3")
-
-distance = [ds.distance for ds in data]
-plt.plot(sorted(distance),".")
 
 bin_centers, counts = data.hist(np.arange(0,16000,4),"p_filt_value_dc_ch3")
 peaks_inds, properties = scipy.signal.find_peaks(counts,prominence=2)
@@ -151,15 +162,9 @@ for pi in peaks_inds_sorted:
     print("ph = %f, counts = %g"%(bin_centers[pi],counts[pi]))
 
 calR = mass.EnergyCalibration()
-calR.add_cal_point(7438,2181.4,"Ni-8")
-calR.add_cal_point(5382,1562.9,"Ni-2")
-calR.add_cal_point(7214,2112.2,"Ni-7")
-# calR.add_cal_point(5938,2112.2,"Ni-elliot cal") #
-calR.add_cal_point(6058,1764.6,"Ni-4")
-calR.add_cal_point(9718,2878.2,"Ni-17")
-calR.add_cal_point(9522,2816.1,"Ni-16")
-# calR.add_cal_point(8110,2384.2,"Ni-11")
-# calR.add_cal_point(5610,1629.8,"Ni-3")
+calR.add_cal_point(2278,653,"O H-like 2p")
+calR.add_cal_point(2002,574,"O He-like 1s2p")
+calR.add_cal_point(2693,774,"O H-like 3p")
 
 for ds in data:
     ds.calibration["p_filt_value_dc_ch3"]=calR
@@ -172,15 +177,17 @@ for ds in data:
 data.convert_to_energy("p_filt_value_dc")
 data.plot_hist(np.arange(4000))
 
+fitter = ds.linefit(653,dlo=10,dhi=10)
+fitter = ds.linefit(574,dlo=10,dhi=10)
+fitter = ds.linefit(774,dlo=10,dhi=10)
 
-def ksdist(counts_a,counts_b):
-    counts_a_norm_cumsum = np.cumsum(counts_a/float(np.sum(counts_a)))
-    counts_b_norm_cumsum = np.cumsum(counts_a/float(np.sum(counts_b)))
-    ydiff = counts_a_norm_cumsum-counts_b_norm_cumsum
-    return np.amin(ydiff), np.amax(ydiff)
+# guess_params = fitter.last_fit_params[:]
+# guess_params[fitter.param_meaning["bg_slope"]]=0
+# guess_params[fitter.param_meaning["background"]]=0
+# fitter.fit(fitter.last_fit_contents, fitter.last_fit_bins, vary_bg=False,vary_bg_slope=False,label="full")
 
 # lets select channels that agree with each other fairly well
-ws=devel.WorstSpectraDTW(data,np.arange(4000))
+ws=devel.WorstSpectra(data,np.arange(4000))
 ws.plot()
 ymax = plt.ylim()[1]
 for e in calR._energies:
@@ -205,8 +212,7 @@ plt.title(data.shortname()+", before exluding worst spectra")
 #  75, 333, 79, 335, 291, 85, 343, 89, 207, 135, 221, 351, 379, 373, 103, 105, 167, 281, 367,
 #  243, 117, 233, 377, 255, 247, 213],"spectra don't agree that well, need more cuts?")
 
-data.plot_hist(np.arange(4000),"p_energy",
-label_lines=["OKAlpha"])
+data.plot_hist(np.arange(4000),"p_energy",label_lines=[])
 plt.xlabel("energy (eV)")
 plt.ylabel("counts per bin")
 plt.yscale("log")

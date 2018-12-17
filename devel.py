@@ -110,7 +110,9 @@ def annotate_lines(axis,label_lines, label_lines_color2=[],color1 = "k",color2="
         elif yscale=="log":
             axis.annotate(label_line, (energy, np.exp((2+i+j)*np.log(plt.ylim()[1])/float(1.5*n))), xycoords="data",color=color2)
 
-def ds_linefit(self,line_name="MnKAlpha", t0=0,tlast=1e20,axis=None,dlo=50,dhi=50,binsize=1,bin_edges=None, attr="p_energy",label="full",plot=True, guess_params=None, ph_units="eV", category={}, g_func=None):
+def ds_linefit(self,line_name="MnKAlpha", t0=0,tlast=1e20,axis=None,dlo=50,dhi=50,
+               binsize=1,bin_edges=None, attr="p_energy",label="full",plot=True,
+               guess_params=None, ph_units="eV", category={}, g_func=None,holdvals={}):
     """Do a fit to `line_name` and return the fitter. You can get the params results with fitter.last_fit_params_dict or any other way you like.
     line_name -- A string like "MnKAlpha" will get "MnKAlphaFitter", your you can pass in a fitter like a mass.GaussianFitter().
     t0 and tlast -- cuts all pulses outside this timerange before fitting
@@ -124,26 +126,36 @@ def ds_linefit(self,line_name="MnKAlpha", t0=0,tlast=1e20,axis=None,dlo=50,dhi=5
     ph_units -- passed to fitter.fit, used in plot label
     category -- pass {"side":"A"} or similar to use categorical cuts
     g_func -- a function a function taking a MicrocalDataSet and returnning a vector like ds.good() would return
+    holdvals -- a dictionary mapping keys from fitter.params_meaning to values... eg {"background":0, "dP_dE":1}
         This vector is anded with the vector calculated by the histogrammer
     """
     if isinstance(line_name, mass.LineFitter):
         fitter = line_name
+        nominal_peak_energy = fitter.spect.nominal_peak_energy
+    elif isinstance(line_name,str):
+        fitter = mass.fitter_classes[line_name]()
+        nominal_peak_energy = fitter.spect.nominal_peak_energy
     else:
-        fittername = line_name+"Fitter"
-        fitter_class = getattr(mass,fittername)
-        fitter = fitter_class()
-        fitter.spect.nominal_peak_energy
+        fitter = mass.GaussianFitter()
+        nominal_peak_energy = float(line_name)
     if bin_edges is None:
-        bin_edges = np.arange(fitter.spect.nominal_peak_energy-dlo, fitter.spect.nominal_peak_energy+dhi, binsize)
+        bin_edges = np.arange(nominal_peak_energy-dlo, nominal_peak_energy+dhi, binsize)
     if axis is None and plot:
         plt.figure()
         axis = plt.gca()
 
     bin_centers, counts = self.hist(bin_edges, attr, t0, tlast, category, g_func)
 
-    params, covar = fitter.fit(counts, bin_centers,params=guess_params,axis=axis,label=label, ph_units=ph_units,plot=plot)
+    if guess_params is None:
+        guess_params = fitter.guess_starting_params(counts,bin_centers)
+    hold = []
+    for (k,v) in holdvals.items():
+        i = fitter.param_meaning[k]
+        guess_params[i]=v
+        hold.append(i)
+    params, covar = fitter.fit(counts, bin_centers,params=guess_params,axis=axis,label=label, ph_units=ph_units,plot=plot, hold=hold)
     if plot:
-        axis.set_title(self.shortname())
+        axis.set_title(self.shortname()+", {}".format(line_name))
 
     return fitter
 

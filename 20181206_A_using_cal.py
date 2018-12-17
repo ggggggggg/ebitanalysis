@@ -15,8 +15,8 @@ import pprint
 import time
 plt.ion()
 
-calHdf5Filename = "/data/20181130_E/20181130_E_mass.hdf5"
-toAnalyzeLJHFilename = "/data/20181130_E/20181130_E_chan1.ljh" # point to one specific channel, it will find all channels
+calHdf5Filename = "/data/20181206_E/20181130_E_mass.hdf5"
+toAnalyzeLJHFilename = "/data/20181206_A/20181206_A_chan1.ljh" # point to one specific channel, it will find all channels
 deleteHDF5BeforeAnalysis = True
 
 
@@ -27,7 +27,7 @@ filenames = [basename+"_chan%i.ljh"%i for i in channels]
 toAnalyzeHDF5Filename = basename+"_mass_external_cal.hdf5"
 if os.path.isfile(toAnalyzeHDF5Filename) and deleteHDF5BeforeAnalysis:
     os.remove(toAnalyzeHDF5Filename)
-data = mass.TESGroup(filenames[:240],hdf5_filename=toAnalyzeHDF5Filename)
+data = mass.TESGroup(filenames[:],hdf5_filename=toAnalyzeHDF5Filename)
 data.summarize_data()
 data.set_chan_bad(dataCal.why_chan_bad.keys(),"was bad in calHdf5File %s"%calHdf5Filename)
 for ds in data:
@@ -46,7 +46,7 @@ for ds in data:
 data.filter_data()
 for ds in data:
     ds._apply_drift_correction()
-data.convert_to_energy("p_filt_value_dc","p_filt_value_phc")
+data.convert_to_energy("p_filt_value_dc","p_filt_value_dc")
 
 
 # lets select channels that agree with each other fairly well
@@ -79,4 +79,3 @@ plt.ylim(0.9,plt.ylim()[1])
 # plt.xlabel("time since start of file (s)")
 # plt.ylabel("pretrigger mean (arb)")
 
-data.linefit("MgKBeta")

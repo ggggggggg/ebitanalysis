@@ -15,8 +15,8 @@ import pprint
 import time
 plt.ion()
 
-calHdf5Filename = "/data/20181130_E/20181130_E_mass.hdf5"
-toAnalyzeLJHFilename = "/data/20181130_E/20181130_E_chan1.ljh" # point to one specific channel, it will find all channels
+calHdf5Filename = "/data/20181204_E/20181204_E_mass.hdf5"
+toAnalyzeLJHFilename = "/data/20181204_K/20181204_K_chan1.ljh" # point to one specific channel, it will find all channels
 deleteHDF5BeforeAnalysis = True
 
 
@@ -27,7 +27,7 @@ filenames = [basename+"_chan%i.ljh"%i for i in channels]
 toAnalyzeHDF5Filename = basename+"_mass_external_cal.hdf5"
 if os.path.isfile(toAnalyzeHDF5Filename) and deleteHDF5BeforeAnalysis:
     os.remove(toAnalyzeHDF5Filename)
-data = mass.TESGroup(filenames[:240],hdf5_filename=toAnalyzeHDF5Filename)
+data = mass.TESGroup(filenames[:150],hdf5_filename=toAnalyzeHDF5Filename)
 data.summarize_data()
 data.set_chan_bad(dataCal.why_chan_bad.keys(),"was bad in calHdf5File %s"%calHdf5Filename)
 for ds in data:
@@ -36,7 +36,7 @@ for ds in data:
         continue
     dsCal = dataCal.channel[ds.channum]
     ds.filter = dsCal.filter
-    ds.apply_cuts(dsCal.saved_auto_cuts)
+    # ds.apply_cuts(dsCal.saved_auto_cuts)
     for key in dsCal.p_filt_value_dc.attrs.keys():
         ds.p_filt_value_dc.attrs[key]=dsCal.p_filt_value_dc.attrs[key]
     if len(ds.p_filt_value_dc.attrs) != 3:
@@ -46,13 +46,13 @@ for ds in data:
 data.filter_data()
 for ds in data:
     ds._apply_drift_correction()
-data.convert_to_energy("p_filt_value_dc","p_filt_value_phc")
+data.convert_to_energy("p_filt_value_dc","p_filt_value_dc")
 
 
 # lets select channels that agree with each other fairly well
-ws=devel.WorstSpectra(data,np.arange(3000))
+ws=devel.WorstSpectra(data,np.arange(12000))
 ws.plot()
-# plt.title(data.shortname()+", before exluding worst spectra")
+plt.title(data.shortname()+", before exluding worst spectra")
 # medianChisq = np.nanmedian(ws.chisqdict.values())
 # marked = []
 # for ds in data:
@@ -66,17 +66,27 @@ ws.plot()
 # ws.plot()
 # plt.title(data.shortname()+", after excluding worst spectra")
 
-data.plot_hist(np.arange(3000),"p_energy")
+plt.figure(figsize=(20,10))
+data.plot_hist(np.arange(200,12000,1),"p_energy",axis=plt.gca())
 plt.xlabel("energy (eV)")
 plt.ylabel("counts per bin")
-plt.yscale("log")
-plt.ylim(0.9,plt.ylim()[1])
+# plt.yscale("log")
+# plt.ylim(0.9,plt.ylim()[1])
 
 
-# ds = data.first_good_dataset
-# plt.figure()
-# plt.plot(ds.p_timestamp[ds.good()]-ds.p_timestamp[0],ds.p_pretrig_mean[ds.good()],".")
-# plt.xlabel("time since start of file (s)")
-# plt.ylabel("pretrigger mean (arb)")
+ds = data.first_good_dataset
+plt.figure()
+plt.plot(ds.p_timestamp[ds.good()]-ds.p_timestamp[0],ds.p_pretrig_mean[ds.good()],".")
+plt.xlabel("time since start of file (s)")
+plt.ylabel("pretrigger mean (arb)")
 
-data.linefit("MgKBeta")
+# data.linefit("AlKAlpha")
+
+with h5py.File("hists/"+data.shortname()+"_prelim.h5","w") as h5:
+    bin_centers, counts = data.hist(np.arange(4000))
+    h5["bin_centers"]=bin_centers
+    h5["counts"]=counts
+
+np.savetxt("hists/"+data.shortname()+"_prelim.yuri",
+np.vstack((bin_centers,counts)).T,
+header="#bin_centers (eV), counts")
