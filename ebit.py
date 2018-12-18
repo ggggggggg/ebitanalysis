@@ -5,7 +5,8 @@ import fastdtw
 
 class AlignBToA():
     cm = plt.cm.gist_ncar
-    def __init__(self,ds_a, ds_b, peak_xs_a, bin_edges, attr, scale_by_median = True, normalize_before_dtw = True):
+    def __init__(self,ds_a, ds_b, peak_xs_a, bin_edges, attr, category = {},
+                 scale_by_median = True, normalize_before_dtw = True):
         self.ds_a = ds_a
         self.ds_b = ds_b
         self.bin_edges = bin_edges
@@ -15,12 +16,13 @@ class AlignBToA():
         self.attr = attr
         self.scale_by_median = scale_by_median
         self.normalize_before_dtw = normalize_before_dtw
+        self.category = category
         self.peak_inds_b = self.samePeaks()
         self.addCalToB()
 
     def samePeaks(self):
-        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good()]
-        ph_b = getattr(self.ds_b,self.attr)[self.ds_b.good()]
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good(**self.category)]
+        ph_b = getattr(self.ds_b,self.attr)[self.ds_b.good(**self.category)]
         if self.scale_by_median:
             median_ratio_a_over_b = np.median(ph_a)/np.median(ph_b)
         else:
@@ -39,8 +41,8 @@ class AlignBToA():
         return peak_inds_b
 
     def samePeaksPlot(self):
-        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good()]
-        ph_b = getattr(self.ds_b,self.attr)[self.ds_b.good()]
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good(**self.category)]
+        ph_b = getattr(self.ds_b,self.attr)[self.ds_b.good(**self.category)]
         counts_a, _ = np.histogram(ph_a, self.bin_edges)
         counts_b, _ = np.histogram(ph_b, self.bin_edges)
         plt.figure()
@@ -56,8 +58,8 @@ class AlignBToA():
         plt.legend()
 
     def samePeaksPlotWithAlignmentCal(self):
-        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good()]
-        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.good()]
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good(**self.category)]
+        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.good(**self.category)]
         counts_a, _ = np.histogram(ph_a, self.bin_edges)
         counts_b, _ = np.histogram(ph_b, self.bin_edges)
         plt.figure()
@@ -100,15 +102,15 @@ class AlignBToA():
     def _laplaceEntropy(self, w=None):
         if w == None:
             w = self.bin_edges[1]-self.bin_edges[0]
-        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good()]
-        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.good()]
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good(**self.category)]
+        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.good(**self.category)]
         entropy = mass.entropy.laplace_cross_entropy(ph_a[ph_a>self.bin_edges[0]],
                      ph_b[ph_b>self.bin_edges[0]], w=w)
         return entropy
 
     def _ksStatistic(self):
-        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good()]
-        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.good()]
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good(**self.category)]
+        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.good(**self.category)]
         counts_a, _ = np.histogram(ph_a, self.bin_edges)
         counts_b, _ = np.histogram(ph_b, self.bin_edges)
         cdf_a = np.cumsum(counts_a)/np.sum(a)
