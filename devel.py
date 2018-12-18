@@ -211,6 +211,10 @@ class WorstSpectra():
         plt.ylabel("normalized counts per bin (sum=1), arb offset")
         plt.annotate("worst "+self.worstn(5),(0.1,0.9), xycoords="axes fraction")
         plt.annotate("best  "+self.bestn(5),(0.1,0.85), xycoords="axes fraction")
+        if self.category == {}:
+            plt.title(self.data.shortname())
+        else:
+            plt.title("{}\ncateogry = {}".format(self.data.shortname(),self.category))
 
 
     def keys_sorted_by_value(self,d): return np.array([k for k, v in sorted(d.iteritems(), key=lambda (k,v): (v,k))])
