@@ -56,6 +56,7 @@ class AlignBToA():
         plt.xlabel(self.attr)
         plt.ylabel("counts per %0.2f unit bin"%(self.bin_centers[1]-self.bin_centers[0]))
         plt.legend()
+        plt.title(self.ds_a.shortname()+" + "+self.ds_b.shortname()+"\nwith same peaks noted, peaks not expected to be aligned in this plot")
 
     def samePeaksPlotWithAlignmentCal(self):
         ph_a = getattr(self.ds_a,self.attr)[self.ds_a.good(**self.category)]
@@ -174,6 +175,18 @@ reference_plot_gaussian_fwhm=0.5,
 nominal_peak_energy=697.79546 ,
 energies=np.array([697.79546 ]), lorentzian_fwhm=np.array([0.1]),
 reference_amplitude=np.array([1]),
+reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
+,ka12_energy_diff=None
+)
+
+mass.addfitter(
+element="Ne",
+linetype=" H-Like 2p",
+reference_short='NIST ASD',
+reference_plot_gaussian_fwhm=0.5,
+nominal_peak_energy=(1021.952896*2+1021.497550*1)/3,
+energies=np.array([1021.497550, 1021.952896]), lorentzian_fwhm=np.array([0.1,0.1]),
+reference_amplitude=np.array([1,2]),
 reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
 ,ka12_energy_diff=None
 )
