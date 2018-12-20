@@ -178,6 +178,66 @@ reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
 ,ka12_energy_diff=None
 )
 
+mass.addfitter(
+element="Ne",
+linetype=" H-Like 3p",
+reference_short='NIST ASD',
+reference_plot_gaussian_fwhm=0.5,
+nominal_peak_energy=(1210.961453*2+1210.826524*1)/3,
+energies=np.array([1210.826524, 1210.961453]), lorentzian_fwhm=np.array([0.1,0.1]),
+reference_amplitude=np.array([1,2]),
+reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
+,ka12_energy_diff=None
+)
+
+mass.addfitter(
+element="Ne",
+linetype=" H-Like 4p",
+reference_short='NIST ASD',
+reference_plot_gaussian_fwhm=0.5,
+nominal_peak_energy=(1277.130058*2+1277.073140*1)/3,
+energies=np.array([1277.073140, 1277.130058]), lorentzian_fwhm=np.array([0.1,0.1]),
+reference_amplitude=np.array([1,2]),
+reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
+,ka12_energy_diff=None
+)
+
+mass.addfitter(
+element="Ne",
+linetype=" He-Like 1s2s",
+reference_short='NIST ASD',
+reference_plot_gaussian_fwhm=0.5,
+nominal_peak_energy=905.0772 ,
+energies=np.array([905.0772]), lorentzian_fwhm=np.array([0.1]),
+reference_amplitude=np.array([1]),
+reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
+,ka12_energy_diff=None
+)
+
+mass.addfitter(
+element="Ne",
+linetype=" He-Like 1s2p",
+reference_short='NIST ASD',
+reference_plot_gaussian_fwhm=0.5,
+nominal_peak_energy=922.0159 ,
+energies=np.array([922.0159]), lorentzian_fwhm=np.array([0.1]),
+reference_amplitude=np.array([1]),
+reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
+,ka12_energy_diff=None
+)
+
+mass.addfitter(
+element="Ne",
+linetype=" He-Like 1s3p",
+reference_short='NIST ASD',
+reference_plot_gaussian_fwhm=0.5,
+nominal_peak_energy=1073.7689 ,
+energies=np.array([1073.7689]), lorentzian_fwhm=np.array([0.1]),
+reference_amplitude=np.array([1]),
+reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT
+,ka12_energy_diff=None
+)
+
 def lineNameOrEnergyToEnergy(lineNameOrEnergy):
     if lineNameOrEnergy in mass.spectrum_classes:
         return mass.spectrum_classes[lineNameOrEnergy]().peak_energy
