@@ -317,9 +317,9 @@ with h5py.File(os.path.join(outputDirName,outputDirName+"_prelim.h5"),"w") as h5
         bin_centers, counts = data.hist(np.arange(4000),category={"injection":injection})
         h5["bin_centers_{}".format(injection)]=bin_centers
         h5["counts_{}".format(injection)]=counts
-    np.savetxt(os.path.join(outputDirName,outputDirName+"_prelim_{}.yuri".format(injection)),
-    np.vstack((bin_centers,counts)).T,
-    header="#bin_centers (eV), counts")
+        np.savetxt(os.path.join(outputDirName,outputDirName+"_prelim_{}.yuri".format(injection)),
+        np.vstack((bin_centers,counts)).T,
+        header="#bin_centers (eV), counts")
 
 for i in plt.get_fignums():
     plt.figure(i)
