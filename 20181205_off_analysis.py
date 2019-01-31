@@ -114,6 +114,7 @@ class Channel():
         self.offFile = offFile
         self.experimentStateFile = experimentStateFile
         self.stdDevResThreshold = stdDevResThreshold
+        self.markedBadBool = False
         self.injestLabelsAndTimestamps(experimentStateFile.labels, experimentStateFile.unixnanos)
         self.learnChannumAndShortname()
 
@@ -192,6 +193,16 @@ class Channel():
     def energy(self):
         uncalibrated = getattr(self, self.calibration.uncalibratedName)
         return self.calibration(uncalibrated)
+
+    @property
+    def energyRough(self):
+        uncalibrated = getattr(self, self.calibrationRough.uncalibratedName)
+        return self.calibrationRough(uncalibrated)
+
+    @property
+    def arbsInRefChannelUnits(self):
+        uncalibratedName = getattr(Self, self.calibrationArbsInRefChannelUnits.uncalibratedName)
+        return self.calibrationArbsInRefChannelUnits(uncalibrated)
 
     def plotAvsB(self, nameA, nameB, axis=None, states=None, includeBad=False):
         if axis == None:
@@ -293,8 +304,99 @@ class Channel():
         plt.legend()
         return axis
 
+    def linefit(self,lineNameOrEnergy="MnKAlpha", attr="energy", states=None, axis=None,dlo=50,dhi=50,
+                   binsize=1,binEdges=None,label="full",plot=True,
+                   guessParams=None, g_func=None, holdvals=None):
+        """Do a fit to `lineNameOrEnergy` and return the fitter. You can get the params results with fitter.last_fit_params_dict or any other way you like.
+        lineNameOrEnergy -- A string like "MnKAlpha" will get "MnKAlphaFitter", your you can pass in a fitter like a mass.GaussianFitter().
+        attr -- default is "energyRough". you must pass binEdges if attr is other than "energy" or "energyRough"
+        states -- will be passed to hist, coAddStates will be True
+        axis -- if axis is None and plot==True, will create a new figure, otherwise plot onto this axis
+        dlo and dhi and binsize -- by default it tries to fit with bin edges given by np.arange(fitter.spect.nominal_peak_energy-dlo, fitter.spect.nominal_peak_energy+dhi, binsize)
+        binEdges -- pass the binEdges you want as a numpy array
+        label -- passed to fitter.plot
+        plot -- passed to fitter.fit, determine if plot happens
+        guessParams -- passed to fitter.fit, fitter.fit will guess the params on its own if this is None
+        category -- pass {"side":"A"} or similar to use categorical cuts
+        g_func -- a function a function taking a MicrocalDataSet and returnning a vector like ds.good() would return
+        holdvals -- a dictionary mapping keys from fitter.params_meaning to values... eg {"background":0, "dP_dE":1}
+            This vector is anded with the vector calculated by the histogrammer
+        """
+        if isinstance(lineNameOrEnergy, mass.LineFitter):
+            fitter = lineNameOrEnergy
+            nominal_peak_energy = fitter.spect.nominal_peak_energy
+        elif isinstance(lineNameOrEnergy,str):
+            fitter = mass.fitter_classes[lineNameOrEnergy]()
+            nominal_peak_energy = fitter.spect.nominal_peak_energy
+        else:
+            fitter = mass.GaussianFitter()
+            nominal_peak_energy = float(lineNameOrEnergy)
+        if binEdges is None:
+            if attr == "energy" or attr == "energyRough":
+                binEdges = np.arange(nominal_peak_energy-dlo, nominal_peak_energy+dhi, binsize)
+            else:
+                raise Exception("must pass binEdges if attr is other than energy or energyRough")
+        if axis is None and plot:
+            plt.figure()
+            axis = plt.gca()
+        bin_centers, counts = self.hist(binEdges, attr, states, g_func)
+        if guessParams is None:
+            guessParams = fitter.guess_starting_params(counts,bin_centers)
+        if holdvals is None:
+            holdvals = {}
+        if (attr == "energy" or attr == "energyRough") and "dP_dE" in fitter.param_meaning:
+            holdvals["dP_dE"]=1.0
+        hold = []
+        for (k,v) in holdvals.items():
+            i = fitter.param_meaning[k]
+            guessParams[i]=v
+            hold.append(i)
 
+        params, covar = fitter.fit(counts, bin_centers,params=guessParams,axis=axis,label=label,plot=plot, hold=hold)
+        if plot:
+            axis.set_title(self.shortName+", {}, states = {}".format(lineNameOrEnergy,states))
+            if attr == "energy" or attr == "energyRough":
+                plt.xlabel(attr+" (eV)")
+            else:
+                plt.xlabel(attr+ "(arbs)")
 
+        return fitter
+
+    def learnCalibration(self, attr, calibrationPlan, curvetype = "gain", dlo=50,dhi=50, binsize=1):
+        self.learnCalibrationRough(attr,calibrationPlan)
+        self.calibration = mass.EnergyCalibration(curvetype=curvetype)
+        self.calibration.uncalibratedName = attr
+        fitters = []
+        for (ph, energy, name, states) in zip(calibrationPlan.uncalibratedVals, calibrationPlan.calibratedVals,
+                                      calibrationPlan.names, calibrationPlan.states):
+            if name in mass.fitter_classes:
+                fitter = self.linefit(name, "energyRough", states, dlo=dlo, dhi=dhi,
+                                plot=False, binsize=binsize)
+            else:
+                fitter = self.linefit(energy, "energyRough", states, dlo=dlo, dhi=dhi,
+                                plot=False, binsize=binsize)
+            fitters.append(fitter)
+            if not fitter.fit_success or np.abs(fitter.last_fit_params_dict["peak_ph"][0]-energy)>10:
+                self.markSelfBad("failed fit", fitter, extraInfo = fitter)
+                continue
+            phRefined = self.calibrationRough.energy2ph(fitter.last_fit_params_dict["peak_ph"][0])
+            self.calibration.add_cal_point(phRefined, energy, name)
+        return fitters
+
+    def learnCalibrationRough(self, attr, calibrationPlan):
+        self.calibrationRough = calibrationPlan.getRoughCalibration()
+        assert(hasattr(self, attr))
+        self.calibrationRough.uncalibratedName = attr
+
+    def learnCalibrationInRefChannelUnits(self, calibrationPlan):
+        pass
+
+    def markSelfBad(self, reason, extraInfo = None):
+        self.markedBadReson = reason
+        self.markedBadExtraInfo = extraInfo
+        self.markedBadBool = True
+        print("MARK SELF BAD NOT REQUESTED, BUT NOT IMPLMENTED: \nreason: {}\n self: {}\nextraInfo: {}".format(self,
+                                                                                               reason, extraInfo))
 
 # I want to trim off the START and END
 # and make an api for choosing the choose inds off f with a certain label or labels
@@ -316,7 +418,7 @@ ds.plotCompareDriftCorrect()
 plt.show()
 
 # calibration
-class Calibrator():
+class CalibrationPlan():
     def __init__(self):
         self.uncalibratedVals = np.zeros(0)
         self.calibratedVals = np.zeros(0)
@@ -340,7 +442,7 @@ class Calibrator():
         self.states.append(states)
 
     def __repr__(self):
-        s = """Calibrator with {} entries
+        s = """CalibrationPlan with {} entries
         x: {}
         y: {}
         states: {}
@@ -348,19 +450,29 @@ class Calibrator():
         return s
 
     def getRoughCalibration(self):
-        cal = mass.EnergyCalibration()
+        cal = mass.EnergyCalibration(curvetype="gain")
         for (x,y,name) in zip(self.uncalibratedVals, self.calibratedVals, self.names):
             cal.add_cal_point(x,y,name)
         return cal
 
 # filt value, line name or energy, states, name
-cal = Calibrator()
-cal.addCalPoint(3404, "Ne He-Like 1s2p", states="B")
-cal.addCalPoint(3768, "Ne H-Like 2p", states="B")
-cal.addCalPoint(7869, 2181.4, states="C", name = "W Ni-8")
-roughCal = cal.getRoughCalibration()
-roughCal.uncalibratedName = "filtValueDC"
-ds.calibration = roughCal
-ds.energy
+calibrationPlan = CalibrationPlan()
+calibrationPlan.addCalPoint(3404, "Ne He-Like 1s2p", states="B")
+calibrationPlan.addCalPoint(3768, "Ne H-Like 2p", states="B")
+calibrationPlan.addCalPoint(7869, 2181.4, states="C", name = "W Ni-8")
+ds.learnCalibrationRough("filtValueDC",calibrationPlan)
+fitters = ds.learnCalibration("filtValueDC",calibrationPlan) # overwrites calibrationRough
 
-ds.plotHist(np.arange(0,4000,1),"energy", coAddStates=False)
+
+ds.plotHist(np.arange(0,4000,1),"energyRough", coAddStates=False)
+
+ds.linefit("Ne H-Like 2p",attr="energy",states="B")
+ds.linefit("Ne He-Like 1s2p",attr="energy",states="B")
+ds.linefit(2181.4,attr="energy",states="C")
+# bake in energyRough and arbUnitsOfReferenceChannel
+# linefit
+# execute calibration plan
+
+ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
+
+plt.show()
