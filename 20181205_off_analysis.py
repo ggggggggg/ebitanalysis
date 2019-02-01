@@ -7,6 +7,8 @@ import os
 
 import numpy as np
 import pylab as plt
+import progress.bar
+import inspect
 
 maxChans = 240
 delete_hdf5_file_before_analysis = True
@@ -58,6 +60,9 @@ class ExperimentStateFile():
         self.labels = labels
         self.unixnanos = np.array(unixnanos)
 
+    def __repr__(self):
+        return "ExperimentStateFile: "+self.filename
+
 
 
 
@@ -107,20 +112,79 @@ class DriftCorrection():
     def fromHDF5(self):
         pass
 
+class GroupLooper(object):
+    """A mixin class to allow TESGroup objects to hold methods that loop over
+    their constituent channels. (Has to be a mixin, in order to break the import
+    cycle that would otherwise occur.)"""
+    pass
+
+
+def _add_group_loop(method):
+    """Add MicrocalDataSet method `method` to GroupLooper (and hence, to TESGroup).
+
+    This is a decorator to add before method definitions inside class MicrocalDataSet.
+    Usage is:
+
+    class MicrocalDataSet(...):
+        ...
+
+        @_add_group_loop
+        def awesome_fuction(self, ...):
+            ...
+    """
+    method_name = method.__name__
+
+    def wrapper(self, *args, **kwargs):
+        bar = SilenceBar(method_name, max=len(self.offFileNames), silence=not self.verbose)
+        for (channum,ds) in self.items():
+            try:
+                method(ds, *args, **kwargs)
+            except KeyboardInterrupt as e:
+                raise e
+            except Exception as e:
+                print("channel {} failed with {}".format(channum,e))
+            bar.next()
+        bar.finish()
+    wrapper.__name__ = method_name
+
+    # Generate a good doc-string.
+    lines = ["Loop over self, calling the %s(...) method for each channel." % method_name]
+    arginfo = inspect.getargspec(method)
+    argtext = inspect.formatargspec(*arginfo)
+    if method.__doc__ is None:
+        lines.append("\n%s%s has no docstring" % (method_name, argtext))
+    else:
+        lines.append("\n%s%s docstring reads:" % (method_name, argtext))
+        lines.append(method.__doc__)
+    wrapper.__doc__ = "\n".join(lines)
+
+    setattr(GroupLooper, method_name, wrapper)
+    return method
+
 # wrap up an off file with some conviencine functions
 # like a TESChannel
 class Channel():
-    def __init__(self, offFile, experimentStateFile, stdDevResThreshold):
+    def __init__(self, offFile, experimentStateFile):
         self.offFile = offFile
         self.experimentStateFile = experimentStateFile
-        self.stdDevResThreshold = stdDevResThreshold
         self.markedBadBool = False
         self.injestLabelsAndTimestamps(experimentStateFile.labels, experimentStateFile.unixnanos)
         self.learnChannumAndShortname()
+        self.learnStdDevResThresholdUsingMedianAbsoluteDeviation()
 
     def learnChannumAndShortname(self):
         basename, self.channum = mass.ljh_util.ljh_basename_channum(self.offFile.filename)
         self.shortName = os.path.split(basename)[-1] + " chan%g"%self.channum
+
+    def learnStdDevResThresholdUsingMedianAbsoluteDeviation(self, nSigma = 7):
+        median = np.median(self.residualStdDev)
+        mad = np.median(np.abs(self.residualStdDev-median))
+        k = 1.4826 # for gaussian distribution, ratio of sigma to median absolution deviation
+        sigma = mad*k
+        self.stdDevResThreshold = median+nSigma*sigma
+
+    def learnStdDevResThresholdUsingRatioToNoiseStd(self, ratioToNoiseStd=1.5):
+        self.stdDevResThreshold = self.offFile.header["ModelInfo"]["NoiseStandardDeviation"]*ratioToNoiseStd
 
     def injestLabelsAndTimestamps(self, labels, unixnanos, excludeStart = True, excludeEnd = True):
         self.statesDict = {}
@@ -266,6 +330,7 @@ class Channel():
         axis.set_title(self.shortName)
         annotate_lines(axis, labelLines)
 
+    @_add_group_loop
     def learnDriftCorrection(self, states = None):
         g = self.choose(states)
         indicator = self.pretriggerMean[g]
@@ -398,18 +463,42 @@ class Channel():
         print("MARK SELF BAD NOT REQUESTED, BUT NOT IMPLMENTED: \nreason: {}\n self: {}\nextraInfo: {}".format(self,
                                                                                                reason, extraInfo))
 
+    def plotResidualStdDev(self, axis = None):
+        if axis is None:
+            plt.figure()
+            ax = plt.gca()
+        x = np.sort(ds.residualStdDev)/f.header["ModelInfo"]["NoiseStandardDeviation"]
+        y = np.linspace(0,1,len(self))
+        inds = x>(self.stdDevResThreshold/f.header["ModelInfo"]["NoiseStandardDeviation"])
+        plt.plot(x,y, label="<threshold")
+        plt.plot(x[inds], y[inds], "r", label=">threshold")
+        plt.vlines(self.stdDevResThreshold/f.header["ModelInfo"]["NoiseStandardDeviation"], 0, 1)
+        plt.xlabel("residualStdDev/noiseStdDev")
+        plt.ylabel("fraction of pulses with equal or lower residualStdDev")
+        plt.title("{}, {} total pulses, {:0.3f} cut".format(
+            self.shortName, len(self), inds.sum()/float(len(self)) ))
+        plt.legend()
+        plt.xlim(max(0,x[0]), 1.5)
+        plt.ylim(0,1)
+
+    def __len__(self):
+        return len(self.offFile)
+
+
+
 # I want to trim off the START and END
 # and make an api for choosing the choose inds off f with a certain label or labels
 # f.filt_value[f.choose("A")]
 # f.filt_value[f.choose("A","B","Ir 12 kV")]
 inds = np.searchsorted(f["unixnano"],states.unixnanos)
 
-ds = Channel(f,states,30)
+ds = Channel(f,states)
 ds.plotAvsB("relTimeSec", "residualStdDev",  includeBad=True)
 ds.plotAvsB("relTimeSec", "pretriggerMean", includeBad=True)
 ds.plotAvsB("relTimeSec", "filtValue", includeBad=False)
 ds.plotHist(np.arange(0,40000,4),"filtValue")
 ds.plotHist(np.arange(0,40000,4),"filtValue", coAddStates=False)
+ds.plotResidualStdDev()
 
 
 # drift correction
@@ -455,6 +544,71 @@ class CalibrationPlan():
             cal.add_cal_point(x,y,name)
         return cal
 
+
+def getOffFileListFromOneFile(filename):
+    basename, _ = mass.ljh_util.ljh_basename_channum(filename)
+    return mass.ljh_util.filename_glob_expand(basename+"_chan*.off")
+
+
+class SilenceBar(progress.bar.Bar):
+    "A progres bar that can be turned off by passing silence=True"
+    def __init__(self,message, max, silence):
+        self.silence = silence
+        if not self.silence:
+            progress.bar.Bar.__init__(self, message, max=max)
+
+    def next(self):
+        if not self.silence:
+            progress.bar.Bar.next(self)
+
+    def finish(self):
+        if not self.silence:
+            progress.bar.Bar.finish(self)
+
+
+class ChannelGroup(GroupLooper, collections.OrderedDict):
+    def __init__(self, offFileNames, verbose=True):
+        collections.OrderedDict.__init__(self)
+        self.verbose = verbose
+        self.offFileNames = offFileNames
+        self.experimentStateFile = ExperimentStateFile(offFilename=self.offFileNames[0])
+        self.loadChannels()
+
+    def loadChannels(self):
+        bar = SilenceBar('Parse OFF File Headers', max=len(self.offFileNames), silence=not self.verbose)
+        for name in self.offFileNames:
+            _, channum = mass.ljh_util.ljh_basename_channum(name)
+            self[channum] = Channel(off.OFFFile(name), self.experimentStateFile)
+            bar.next()
+        bar.finish()
+
+    def __repr__(self):
+        return "ChannelGroup with {} channels".format(len(self))
+
+    def alignToReferenceChannel(self, referenceChannelNumber=None):
+        if referenceChannelNumber is None:
+            ref = self.firstGoodChannel()
+        else:
+            ref = self[referenceChannelNumber]
+        bar = SilenceBar('alignToReferenceChannel', max=len(self.offFileNames), silence=not self.verbose)
+        for (channum, ds) in self.items():
+            ds.alignToReferenceChannel(ds)
+            bar.next()
+        bar.finish()
+
+    def firstGoodChannel(self):
+        return self[1]
+
+    # def learnDriftCorrection(self, states=None):
+    #     bar = SilenceBar('learnDriftCorrection', max=len(self.offFileNames), silence=not self.verbose)
+    #     for (channum, ds) in self.items():
+    #         ds.learnDriftCorrection(states)
+    #         bar.next()
+    #     bar.finish()
+
+data = ChannelGroup(getOffFileListFromOneFile(filename))
+data.learnDriftCorrection()
+ds=data.firstGoodChannel()
 # filt value, line name or energy, states, name
 calibrationPlan = CalibrationPlan()
 calibrationPlan.addCalPoint(3404, "Ne He-Like 1s2p", states="B")
@@ -476,3 +630,4 @@ ds.linefit(2181.4,attr="energy",states="C")
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
 plt.show()
+data.alignToReferenceChannel(ds.channum)
