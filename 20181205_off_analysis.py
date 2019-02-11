@@ -9,6 +9,7 @@ import numpy as np
 import pylab as plt
 import progress.bar
 import inspect
+import fastdtw
 
 maxChans = 240
 delete_hdf5_file_before_analysis = True
@@ -62,14 +63,6 @@ class ExperimentStateFile():
 
     def __repr__(self):
         return "ExperimentStateFile: "+self.filename
-
-
-
-
-
-states = ExperimentStateFile(offFilename=filename)
-
-f = off.OFFFile(filename)
 
 
 def annotate_lines(axis,labelLines, labelLines_color2=[],color1 = "k",color2="r"):
@@ -176,6 +169,7 @@ class Channel():
         basename, self.channum = mass.ljh_util.ljh_basename_channum(self.offFile.filename)
         self.shortName = os.path.split(basename)[-1] + " chan%g"%self.channum
 
+    @_add_group_loop
     def learnStdDevResThresholdUsingMedianAbsoluteDeviation(self, nSigma = 7):
         median = np.median(self.residualStdDev)
         mad = np.median(np.abs(self.residualStdDev-median))
@@ -188,7 +182,7 @@ class Channel():
 
     def injestLabelsAndTimestamps(self, labels, unixnanos, excludeStart = True, excludeEnd = True):
         self.statesDict = {}
-        inds = np.searchsorted(f["unixnano"],states.unixnanos)
+        inds = np.searchsorted(self.offFile["unixnano"],unixnanos)
         for i, label in enumerate(labels):
             if label == "START" and excludeStart:
                 continue
@@ -265,7 +259,7 @@ class Channel():
 
     @property
     def arbsInRefChannelUnits(self):
-        uncalibratedName = getattr(Self, self.calibrationArbsInRefChannelUnits.uncalibratedName)
+        uncalibrated = getattr(self, self.calibrationArbsInRefChannelUnits.uncalibratedName)
         return self.calibrationArbsInRefChannelUnits(uncalibrated)
 
     def plotAvsB(self, nameA, nameB, axis=None, states=None, includeBad=False):
@@ -452,6 +446,7 @@ class Channel():
         self.calibrationRough = calibrationPlan.getRoughCalibration()
         assert(hasattr(self, attr))
         self.calibrationRough.uncalibratedName = attr
+        self.calibrationRoughPlan = calibrationPlan
 
     def learnCalibrationInRefChannelUnits(self, calibrationPlan):
         pass
@@ -460,19 +455,19 @@ class Channel():
         self.markedBadReson = reason
         self.markedBadExtraInfo = extraInfo
         self.markedBadBool = True
-        print("MARK SELF BAD NOT REQUESTED, BUT NOT IMPLMENTED: \nreason: {}\n self: {}\nextraInfo: {}".format(self,
+        print("MARK SELF BAD REQUESTED, BUT NOT IMPLMENTED: \nreason: {}\n self: {}\nextraInfo: {}".format(self,
                                                                                                reason, extraInfo))
 
     def plotResidualStdDev(self, axis = None):
         if axis is None:
             plt.figure()
             ax = plt.gca()
-        x = np.sort(ds.residualStdDev)/f.header["ModelInfo"]["NoiseStandardDeviation"]
+        x = np.sort(ds.residualStdDev)/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"]
         y = np.linspace(0,1,len(self))
-        inds = x>(self.stdDevResThreshold/f.header["ModelInfo"]["NoiseStandardDeviation"])
+        inds = x>(self.stdDevResThreshold/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"])
         plt.plot(x,y, label="<threshold")
         plt.plot(x[inds], y[inds], "r", label=">threshold")
-        plt.vlines(self.stdDevResThreshold/f.header["ModelInfo"]["NoiseStandardDeviation"], 0, 1)
+        plt.vlines(self.stdDevResThreshold/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"], 0, 1)
         plt.xlabel("residualStdDev/noiseStdDev")
         plt.ylabel("fraction of pulses with equal or lower residualStdDev")
         plt.title("{}, {} total pulses, {:0.3f} cut".format(
@@ -484,27 +479,131 @@ class Channel():
     def __len__(self):
         return len(self.offFile)
 
+    def alignToReferenceChannel(self, referenceChannel):
+        # is referenceChannel calibrated?
+        refPlan = referenceChannel.calibrationRoughPlan
 
 
-# I want to trim off the START and END
-# and make an api for choosing the choose inds off f with a certain label or labels
-# f.filt_value[f.choose("A")]
-# f.filt_value[f.choose("A","B","Ir 12 kV")]
-inds = np.searchsorted(f["unixnano"],states.unixnanos)
+class AlignBToA():
+    cm = plt.cm.gist_ncar
+    def __init__(self,ds_a, ds_b, peak_xs_a, bin_edges, attr, states = None,
+                 scale_by_median = True, normalize_before_dtw = True):
+        self.ds_a = ds_a
+        self.ds_b = ds_b
+        self.bin_edges = bin_edges
+        self.bin_centers = 0.5*(bin_edges[1:]+bin_edges[:-1])
+        self.peak_xs_a = peak_xs_a
+        self.attr = attr
+        self.scale_by_median = scale_by_median
+        self.normalize_before_dtw = normalize_before_dtw
+        self.states = states
+        self.peak_inds_b = self.samePeaks()
+        self.addCalToB()
 
-ds = Channel(f,states)
-ds.plotAvsB("relTimeSec", "residualStdDev",  includeBad=True)
-ds.plotAvsB("relTimeSec", "pretriggerMean", includeBad=True)
-ds.plotAvsB("relTimeSec", "filtValue", includeBad=False)
-ds.plotHist(np.arange(0,40000,4),"filtValue")
-ds.plotHist(np.arange(0,40000,4),"filtValue", coAddStates=False)
-ds.plotResidualStdDev()
+    def samePeaks(self):
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.choose(self.states)]
+        ph_b = getattr(self.ds_b,self.attr)[self.ds_b.choose(self.states)]
+        if self.scale_by_median:
+            median_ratio_a_over_b = np.median(ph_a)/np.median(ph_b)
+        else:
+            median_ratio_a_over_b = 1.0
+        ph_b_median_scaled = ph_b*median_ratio_a_over_b
+        counts_a, _ = np.histogram(ph_a, self.bin_edges)
+        counts_b_median_scaled, _ = np.histogram(ph_b_median_scaled, self.bin_edges)
+        self.peak_inds_a = self.findPeakIndsA(counts_a)
+        if self.normalize_before_dtw:
+            distance, path = fastdtw.fastdtw(self.normalize(counts_a), self.normalize(counts_b_median_scaled))
+        else:
+            distance, path = fastdtw.fastdtw(counts_a, counts_b_median_scaled)
+        i_a = [x[0] for x in path]
+        i_b_median_scaled = [x[1] for x in path]
+        peak_inds_b_median_scaled = np.array([i_b_median_scaled[i_a.index(pia)] for pia in self.peak_inds_a])
+        peak_xs_b_median_scaled = self.bin_edges[peak_inds_b_median_scaled]
+        peak_xs_b = peak_xs_b_median_scaled/median_ratio_a_over_b
+        min_bin = self.bin_edges[0]
+        bin_spacing = self.bin_edges[1]-self.bin_edges[0]
+        peak_inds_b = map(int,(peak_xs_b-min_bin)/bin_spacing)
+        return peak_inds_b
 
+    def findPeakIndsA(self, counts_a):
+        peak_inds_a = np.searchsorted(self.bin_edges, self.peak_xs_a)-1
+        return peak_inds_a
 
-# drift correction
-driftCorrectInfo = ds.learnDriftCorrection()
-ds.plotCompareDriftCorrect()
-plt.show()
+    def samePeaksPlot(self):
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.choose(self.states)]
+        ph_b = getattr(self.ds_b,self.attr)[self.ds_b.choose(self.states)]
+        counts_a, _ = np.histogram(ph_a, self.bin_edges)
+        counts_b, _ = np.histogram(ph_b, self.bin_edges)
+        plt.figure()
+        plt.plot(self.bin_centers,counts_a,label="a: channel %i"%self.ds_a.channum)
+        for i,pi in enumerate(self.peak_inds_a):
+            plt.plot(self.bin_centers[pi],counts_a[pi],"o",color=self.cm(float(i)/len(self.peak_inds_a)))
+
+        plt.plot(self.bin_centers,counts_b,label="b: channel %i"%self.ds_b.channum)
+        for i,pi in enumerate(self.peak_inds_b):
+            plt.plot(self.bin_centers[pi],counts_b[pi],"o",color=self.cm(float(i)/len(self.peak_inds_b)))
+        plt.xlabel(self.attr)
+        plt.ylabel("counts per %0.2f unit bin"%(self.bin_centers[1]-self.bin_centers[0]))
+        plt.legend()
+        plt.title(self.ds_a.shortName+" + "+self.ds_b.shortName+"\nwith same peaks noted, peaks not expected to be aligned in this plot")
+
+    def samePeaksPlotWithAlignmentCal(self):
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.choose(self.states)]
+        ph_b = self.ds_b.arbsInRefChannelUnits[self.ds_b.choose(self.states)]
+        counts_a, _ = np.histogram(ph_a, self.bin_edges)
+        counts_b, _ = np.histogram(ph_b, self.bin_edges)
+        plt.figure()
+        plt.plot(self.bin_centers,counts_a,label="a: channel %i"%self.ds_a.channum)
+        for i,pi in enumerate(self.peak_inds_a):
+            plt.plot(self.bin_centers[pi],counts_a[pi],"o",color=self.cm(float(i)/len(self.peak_inds_a)))
+        plt.plot(self.bin_centers,counts_b,label="b: channel %i"%self.ds_b.channum)
+        for i,pi in enumerate(self.peak_inds_a):
+            plt.plot(self.bin_centers[pi],counts_b[pi],"o",color=self.cm(float(i)/len(self.peak_inds_a)))
+        plt.xlabel("arbsInRefChannelUnits (ref channel = {})".format(self.ds_a.channum))
+        plt.ylabel("counts per %0.2f unit bin"%(self.bin_centers[1]-self.bin_centers[0]))
+        plt.legend()
+
+    def normalize(self,x):
+        return x/float(np.sum(x))
+
+    def addCalToB(self):
+        cal_b_to_a = mass.EnergyCalibration(curvetype="gain")
+        for pi_a,pi_b in zip(self.peak_inds_a, self.peak_inds_b):
+            cal_b_to_a.add_cal_point(self.bin_centers[pi_b], self.bin_centers[pi_a])
+        cal_b_to_a.uncalibratedName = self.attr
+        self.ds_b.calibrationArbsInRefChannelUnits=cal_b_to_a
+        self.cal_b_to_a = cal_b_to_a
+
+    def testForGoodnessBasedOnCalCurvature(self, threshold_frac = .1):
+        assert threshold_frac > 0
+        threshold_hi = 1+threshold_frac
+        threshold_lo = 1/threshold_hi
+        # here we test the "curvature" of cal_b_to_a
+        # by comparing the most extreme sloped segment to the median slope
+        derivatives = self.cal_b_to_a.energy2dedph(self.cal_b_to_a._energies)
+        diff_frac_hi = np.amax(derivatives)/np.median(derivatives)
+        diff_frac_lo = np.amin(derivatives)/np.median(derivatives)
+        return diff_frac_hi < threshold_hi and diff_frac_lo > threshold_lo
+
+    def _laplaceEntropy(self, w=None):
+        if w == None:
+            w = self.bin_edges[1]-self.bin_edges[0]
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.choose(self.states)]
+        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.choose(self.states)]
+        entropy = mass.entropy.laplace_cross_entropy(ph_a[ph_a>self.bin_edges[0]],
+                     ph_b[ph_b>self.bin_edges[0]], w=w)
+        return entropy
+
+    def _ksStatistic(self):
+        ph_a = getattr(self.ds_a,self.attr)[self.ds_a.choose(self.states)]
+        ph_b = getattr(self.ds_b,self.newattr)[self.ds_b.choose(self.states)]
+        counts_a, _ = np.histogram(ph_a, self.bin_edges)
+        counts_b, _ = np.histogram(ph_b, self.bin_edges)
+        cdf_a = np.cumsum(counts_a)/np.sum(a)
+        cdf_b = np.cumsum(counts_b)/np.sum(b)
+        ks_statistic = np.amax(np.abs(cdf_a-cdf_b))
+        return ks_statistic
+
 
 # calibration
 class CalibrationPlan():
@@ -545,9 +644,12 @@ class CalibrationPlan():
         return cal
 
 
-def getOffFileListFromOneFile(filename):
+def getOffFileListFromOneFile(filename, maxChans=None):
     basename, _ = mass.ljh_util.ljh_basename_channum(filename)
-    return mass.ljh_util.filename_glob_expand(basename+"_chan*.off")
+    z = mass.ljh_util.filename_glob_expand(basename+"_chan*.off")
+    if maxChans is not None:
+        z = z[:min(maxChans, len(z))]
+    return z
 
 
 class SilenceBar(progress.bar.Bar):
@@ -599,16 +701,23 @@ class ChannelGroup(GroupLooper, collections.OrderedDict):
     def firstGoodChannel(self):
         return self[1]
 
-    # def learnDriftCorrection(self, states=None):
-    #     bar = SilenceBar('learnDriftCorrection', max=len(self.offFileNames), silence=not self.verbose)
-    #     for (channum, ds) in self.items():
-    #         ds.learnDriftCorrection(states)
-    #         bar.next()
-    #     bar.finish()
 
-data = ChannelGroup(getOffFileListFromOneFile(filename))
+
+
+
+
+data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=4))
 data.learnDriftCorrection()
 ds=data.firstGoodChannel()
+ds.plotAvsB("relTimeSec", "residualStdDev",  includeBad=True)
+ds.plotAvsB("relTimeSec", "pretriggerMean", includeBad=True)
+ds.plotAvsB("relTimeSec", "filtValue", includeBad=False)
+ds.plotHist(np.arange(0,40000,4),"filtValue")
+ds.plotHist(np.arange(0,40000,4),"filtValue", coAddStates=False)
+ds.plotResidualStdDev()
+driftCorrectInfo = ds.learnDriftCorrection()
+ds.plotCompareDriftCorrect()
+
 # filt value, line name or energy, states, name
 calibrationPlan = CalibrationPlan()
 calibrationPlan.addCalPoint(3404, "Ne He-Like 1s2p", states="B")
@@ -616,6 +725,8 @@ calibrationPlan.addCalPoint(3768, "Ne H-Like 2p", states="B")
 calibrationPlan.addCalPoint(7869, 2181.4, states="C", name = "W Ni-8")
 ds.learnCalibrationRough("filtValueDC",calibrationPlan)
 fitters = ds.learnCalibration("filtValueDC",calibrationPlan) # overwrites calibrationRough
+
+
 
 
 ds.plotHist(np.arange(0,4000,1),"energyRough", coAddStates=False)
@@ -629,5 +740,10 @@ ds.linefit(2181.4,attr="energy",states="C")
 
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
+
+aligner = AlignBToA(ds, data[3], calibrationPlan.uncalibratedVals, np.arange(500,20000,4), "filtValueDC")
+aligner.samePeaksPlot()
+aligner.samePeaksPlotWithAlignmentCal()
+
+
 plt.show()
-data.alignToReferenceChannel(ds.channum)
