@@ -11,6 +11,7 @@ import progress.bar
 import inspect
 import fastdtw
 
+plt.close("all")
 maxChans = 240
 delete_hdf5_file_before_analysis = True
 filtValueChoice = "p_filt_value_dc" # use p_filt_value mostly, try p_filt_value_dc on longer, higher count-rate datasets
@@ -28,14 +29,17 @@ dirname = "/Users/oneilg/Documents/EBIT/data/20181205_BC"
 filename = "/Users/oneilg/Documents/EBIT/data/20181205_BC/20181205_BC_chan1.off"
 
 class ExperimentStateFile():
-    def __init__(self, filename=None, offFilename=None):
+    def __init__(self, filename=None, offFilename=None, excludeStart = True, excludeEnd = True):
         if filename is not None:
             self.filename = filename
         elif offFilename is not None:
             self.filename = self.experimentStateFilenameFromOffFilename(offFilename)
         else:
             raise Exception("provide filename or offFilename")
+        self.excludeStart = excludeStart
+        self.excludeEnd = excludeEnd
         self.parse()
+
 
     def experimentStateFilenameFromOffFilename(self,offFilename):
         basename, channum = mass.ljh_util.ljh_basename_channum(offFilename)
@@ -58,8 +62,35 @@ class ExperimentStateFile():
             label = b
             unixnanos.append(unixnano)
             labels.append(label)
-        self.labels = labels
+        self.allLabels = labels
         self.unixnanos = np.array(unixnanos)
+        self.labels = self.applyExcludesToLabels(self.allLabels)
+
+    def applyExcludesToLabels(self, allLabels):
+        return [l for l in self.allLabels if (not self.excludeEnd or l!="END") and (not self.excludeStart or l!="START")]
+
+
+    # this needs to be able to refresh with length changes
+    def calcStatesDict(self, unixnanos):
+        """
+        accepts a vector of unixnano timestamps and returns a dictionary mapping
+        state labels to vectors of bools that can be used to
+        index into an array like filtValue"""
+        statesDict = collections.OrderedDict()
+        inds = np.searchsorted(unixnanos, self.unixnanos)
+        for i, label in enumerate(self.allLabels):
+            if label == "START" and self.excludeStart:
+                continue
+            if label == "END" and self.excludeEnd:
+                continue
+            if not label in statesDict:
+                statesDict[label] = np.zeros(len(unixnanos),dtype="bool")
+            if i+1 == len(self.allLabels):
+                statesDict[label][inds[i]:len(unixnanos)]=True
+            else:
+                statesDict[label][inds[i]:inds[i+1]]=True
+        assert(self.labels==statesDict.keys())
+        return statesDict
 
     def __repr__(self):
         return "ExperimentStateFile: "+self.filename
@@ -106,7 +137,7 @@ class DriftCorrection():
         pass
 
 class GroupLooper(object):
-    """A mixin class to allow TESGroup objects to hold methods that loop over
+    """A mixin class to allow ChannelGroup objects to hold methods that loop over
     their constituent channels. (Has to be a mixin, in order to break the import
     cycle that would otherwise occur.)"""
     pass
@@ -129,19 +160,26 @@ def _add_group_loop(method):
 
     def wrapper(self, *args, **kwargs):
         bar = SilenceBar(method_name, max=len(self.offFileNames), silence=not self.verbose)
+        rethrow = kwargs.pop("_rethrow",False)
+        returnVals = collections.OrderedDict()
         for (channum,ds) in self.items():
             try:
-                method(ds, *args, **kwargs)
+                z = method(ds, *args, **kwargs)
+                returnVals[channum] = z
             except KeyboardInterrupt as e:
-                raise e
+                raise(e)
             except Exception as e:
-                print("channel {} failed with {}".format(channum,e))
+                print("\nchannel {} failed with {}".format(channum,e))
+                if rethrow:
+                    raise
             bar.next()
         bar.finish()
+        return returnVals
     wrapper.__name__ = method_name
 
     # Generate a good doc-string.
     lines = ["Loop over self, calling the %s(...) method for each channel." % method_name]
+    lines.append("pass _rethrow=True to see stacktrace from first error")
     arginfo = inspect.getargspec(method)
     argtext = inspect.formatargspec(*arginfo)
     if method.__doc__ is None:
@@ -154,14 +192,106 @@ def _add_group_loop(method):
     setattr(GroupLooper, method_name, wrapper)
     return method
 
+class CorG():
+    """
+    implments methods that are shared across Channel and ChannelGroup
+    """
+    @property
+    def stateLabels(self):
+        return self.experimentStateFile.labels
+
+    def plotHist(self,binEdges,attr,axis=None,labelLines=[],states=None,g_func=None, coAddStates=True):
+        """plot a coadded histogram from all good datasets and all good pulses
+        binEdges -- edges of bins unsed for histogram
+        attr -- which attribute to histogram "p_energy" or "p_filt_value"
+        axis -- if None, then create a new figure, otherwise plot onto this axis
+        annotate_lines -- enter lines names in STANDARD_FEATURES to add to the plot, calls annotate_lines
+        g_func -- a function a function taking a MicrocalDataSet and returnning a vector like ds.good() would return
+            This vector is anded with the vector calculated by the histogrammer    """
+        if axis is None:
+            plt.figure()
+            axis=plt.gca()
+        if states == None:
+            states = self.stateLabels
+        if coAddStates:
+            x,y = self.hist(binEdges, attr, states=states, g_func=g_func)
+            axis.plot(x,y,drawstyle="steps-mid", label=states)
+        else:
+            for state in states:
+                x,y = self.hist(binEdges, attr, states=state, g_func=g_func)
+                axis.plot(x,y,drawstyle="steps-mid", label=state)
+        axis.set_xlabel(attr)
+        axis.set_ylabel("counts per %0.1f unit bin"%(binEdges[1]-binEdges[0]))
+        plt.legend()
+        axis.set_title(self.shortName)
+        annotate_lines(axis, labelLines)
+
+    def linefit(self,lineNameOrEnergy="MnKAlpha", attr="energy", states=None, axis=None,dlo=50,dhi=50,
+                   binsize=1,binEdges=None,label="full",plot=True,
+                   guessParams=None, g_func=None, holdvals=None):
+        """Do a fit to `lineNameOrEnergy` and return the fitter. You can get the params results with fitter.last_fit_params_dict or any other way you like.
+        lineNameOrEnergy -- A string like "MnKAlpha" will get "MnKAlphaFitter", your you can pass in a fitter like a mass.GaussianFitter().
+        attr -- default is "energyRough". you must pass binEdges if attr is other than "energy" or "energyRough"
+        states -- will be passed to hist, coAddStates will be True
+        axis -- if axis is None and plot==True, will create a new figure, otherwise plot onto this axis
+        dlo and dhi and binsize -- by default it tries to fit with bin edges given by np.arange(fitter.spect.nominal_peak_energy-dlo, fitter.spect.nominal_peak_energy+dhi, binsize)
+        binEdges -- pass the binEdges you want as a numpy array
+        label -- passed to fitter.plot
+        plot -- passed to fitter.fit, determine if plot happens
+        guessParams -- passed to fitter.fit, fitter.fit will guess the params on its own if this is None
+        category -- pass {"side":"A"} or similar to use categorical cuts
+        g_func -- a function a function taking a MicrocalDataSet and returnning a vector like ds.good() would return
+        holdvals -- a dictionary mapping keys from fitter.params_meaning to values... eg {"background":0, "dP_dE":1}
+            This vector is anded with the vector calculated by the histogrammer
+        """
+        if isinstance(lineNameOrEnergy, mass.LineFitter):
+            fitter = lineNameOrEnergy
+            nominal_peak_energy = fitter.spect.nominal_peak_energy
+        elif isinstance(lineNameOrEnergy,str):
+            fitter = mass.fitter_classes[lineNameOrEnergy]()
+            nominal_peak_energy = fitter.spect.nominal_peak_energy
+        else:
+            fitter = mass.GaussianFitter()
+            nominal_peak_energy = float(lineNameOrEnergy)
+        if binEdges is None:
+            if attr == "energy" or attr == "energyRough":
+                binEdges = np.arange(nominal_peak_energy-dlo, nominal_peak_energy+dhi, binsize)
+            else:
+                raise Exception("must pass binEdges if attr is other than energy or energyRough")
+        if axis is None and plot:
+            plt.figure()
+            axis = plt.gca()
+        bin_centers, counts = self.hist(binEdges, attr, states, g_func)
+        if guessParams is None:
+            guessParams = fitter.guess_starting_params(counts,bin_centers)
+        if holdvals is None:
+            holdvals = {}
+        if (attr == "energy" or attr == "energyRough") and "dP_dE" in fitter.param_meaning:
+            holdvals["dP_dE"]=1.0
+        hold = []
+        for (k,v) in holdvals.items():
+            i = fitter.param_meaning[k]
+            guessParams[i]=v
+            hold.append(i)
+
+        params, covar = fitter.fit(counts, bin_centers,params=guessParams,axis=axis,label=label,plot=plot, hold=hold)
+        if plot:
+            axis.set_title(self.shortName+", {}, states = {}".format(lineNameOrEnergy,states))
+            if attr == "energy" or attr == "energyRough":
+                plt.xlabel(attr+" (eV)")
+            else:
+                plt.xlabel(attr+ "(arbs)")
+
+        return fitter
+
 # wrap up an off file with some conviencine functions
 # like a TESChannel
-class Channel():
+class Channel(CorG):
     def __init__(self, offFile, experimentStateFile):
         self.offFile = offFile
         self.experimentStateFile = experimentStateFile
         self.markedBadBool = False
-        self.injestLabelsAndTimestamps(experimentStateFile.labels, experimentStateFile.unixnanos)
+        self._statesDict = None
         self.learnChannumAndShortname()
         self.learnStdDevResThresholdUsingMedianAbsoluteDeviation()
 
@@ -179,21 +309,6 @@ class Channel():
 
     def learnStdDevResThresholdUsingRatioToNoiseStd(self, ratioToNoiseStd=1.5):
         self.stdDevResThreshold = self.offFile.header["ModelInfo"]["NoiseStandardDeviation"]*ratioToNoiseStd
-
-    def injestLabelsAndTimestamps(self, labels, unixnanos, excludeStart = True, excludeEnd = True):
-        self.statesDict = {}
-        inds = np.searchsorted(self.offFile["unixnano"],unixnanos)
-        for i, label in enumerate(labels):
-            if label == "START" and excludeStart:
-                continue
-            if label == "END" and excludeEnd:
-                continue
-            if not label in self.statesDict:
-                self.statesDict[label] = np.zeros(self.nRecords,dtype="bool")
-            if i+1 == len(labels):
-                self.statesDict[label][inds[i]:self.nRecords]=True
-            else:
-                self.statesDict[label][inds[i]:inds[i+1]]=True
 
     def choose(self, states=None, good=True):
         """ return boolean indicies of "choose" pulses
@@ -217,12 +332,14 @@ class Channel():
         return "Channel based on %s"%self.offFile
 
     @property
-    def nRecords(self):
-        return len(self.offFile)
+    def statesDict(self):
+        if self._statesDict is None:
+            self._statesDict = self.experimentStateFile.calcStatesDict(self.offFile["unixnano"])
+        return self._statesDict
 
     @property
-    def stateLabels(self):
-        return self.statesDict.keys()
+    def nRecords(self):
+        return len(self.offFile)
 
     @property
     def residualStdDev(self):
@@ -298,32 +415,6 @@ class Channel():
         counts, _ = np.histogram(vals[g],binEdges)
         return binCenters, counts
 
-    def plotHist(self,binEdges,attr,axis=None,labelLines=[],states=None,g_func=None, coAddStates=True):
-        """plot a coadded histogram from all good datasets and all good pulses
-        binEdges -- edges of bins unsed for histogram
-        attr -- which attribute to histogram "p_energy" or "p_filt_value"
-        axis -- if None, then create a new figure, otherwise plot onto this axis
-        annotate_lines -- enter lines names in STANDARD_FEATURES to add to the plot, calls annotate_lines
-        g_func -- a function a function taking a MicrocalDataSet and returnning a vector like ds.good() would return
-            This vector is anded with the vector calculated by the histogrammer    """
-        if axis is None:
-            plt.figure()
-            axis=plt.gca()
-        if states == None:
-            states = self.stateLabels
-        if coAddStates:
-            x,y = self.hist(binEdges, attr, states=states, g_func=g_func)
-            axis.plot(x,y,drawstyle="steps-mid", label=states)
-        else:
-            for state in states:
-                x,y = self.hist(binEdges, attr, states=state, g_func=g_func)
-                axis.plot(x,y,drawstyle="steps-mid", label=state)
-        axis.set_xlabel(attr)
-        axis.set_ylabel("counts per %0.1f unit bin"%(binEdges[1]-binEdges[0]))
-        plt.legend()
-        axis.set_title(self.shortName)
-        annotate_lines(axis, labelLines)
-
     @_add_group_loop
     def learnDriftCorrection(self, states = None):
         g = self.choose(states)
@@ -363,71 +454,22 @@ class Channel():
         plt.legend()
         return axis
 
-    def linefit(self,lineNameOrEnergy="MnKAlpha", attr="energy", states=None, axis=None,dlo=50,dhi=50,
-                   binsize=1,binEdges=None,label="full",plot=True,
-                   guessParams=None, g_func=None, holdvals=None):
-        """Do a fit to `lineNameOrEnergy` and return the fitter. You can get the params results with fitter.last_fit_params_dict or any other way you like.
-        lineNameOrEnergy -- A string like "MnKAlpha" will get "MnKAlphaFitter", your you can pass in a fitter like a mass.GaussianFitter().
-        attr -- default is "energyRough". you must pass binEdges if attr is other than "energy" or "energyRough"
-        states -- will be passed to hist, coAddStates will be True
-        axis -- if axis is None and plot==True, will create a new figure, otherwise plot onto this axis
-        dlo and dhi and binsize -- by default it tries to fit with bin edges given by np.arange(fitter.spect.nominal_peak_energy-dlo, fitter.spect.nominal_peak_energy+dhi, binsize)
-        binEdges -- pass the binEdges you want as a numpy array
-        label -- passed to fitter.plot
-        plot -- passed to fitter.fit, determine if plot happens
-        guessParams -- passed to fitter.fit, fitter.fit will guess the params on its own if this is None
-        category -- pass {"side":"A"} or similar to use categorical cuts
-        g_func -- a function a function taking a MicrocalDataSet and returnning a vector like ds.good() would return
-        holdvals -- a dictionary mapping keys from fitter.params_meaning to values... eg {"background":0, "dP_dE":1}
-            This vector is anded with the vector calculated by the histogrammer
-        """
-        if isinstance(lineNameOrEnergy, mass.LineFitter):
-            fitter = lineNameOrEnergy
-            nominal_peak_energy = fitter.spect.nominal_peak_energy
-        elif isinstance(lineNameOrEnergy,str):
-            fitter = mass.fitter_classes[lineNameOrEnergy]()
-            nominal_peak_energy = fitter.spect.nominal_peak_energy
-        else:
-            fitter = mass.GaussianFitter()
-            nominal_peak_energy = float(lineNameOrEnergy)
-        if binEdges is None:
-            if attr == "energy" or attr == "energyRough":
-                binEdges = np.arange(nominal_peak_energy-dlo, nominal_peak_energy+dhi, binsize)
-            else:
-                raise Exception("must pass binEdges if attr is other than energy or energyRough")
-        if axis is None and plot:
-            plt.figure()
-            axis = plt.gca()
-        bin_centers, counts = self.hist(binEdges, attr, states, g_func)
-        if guessParams is None:
-            guessParams = fitter.guess_starting_params(counts,bin_centers)
-        if holdvals is None:
-            holdvals = {}
-        if (attr == "energy" or attr == "energyRough") and "dP_dE" in fitter.param_meaning:
-            holdvals["dP_dE"]=1.0
-        hold = []
-        for (k,v) in holdvals.items():
-            i = fitter.param_meaning[k]
-            guessParams[i]=v
-            hold.append(i)
+    def calibrationPlanInit(self, attr):
+        self.calibrationPlan = CalibrationPlan()
+        self.calibrationPlanAttr = attr
 
-        params, covar = fitter.fit(counts, bin_centers,params=guessParams,axis=axis,label=label,plot=plot, hold=hold)
-        if plot:
-            axis.set_title(self.shortName+", {}, states = {}".format(lineNameOrEnergy,states))
-            if attr == "energy" or attr == "energyRough":
-                plt.xlabel(attr+" (eV)")
-            else:
-                plt.xlabel(attr+ "(arbs)")
+    def calibrationPlanAddPoint(self, uncalibratedVal, name, states=None, energy=None):
+        self.calibrationPlan.addCalPoint(uncalibratedVal, name, states, energy)
+        self.calibrationRough = self.calibrationPlan.getRoughCalibration()
+        self.calibrationRough.uncalibratedName = self.calibrationPlanAttr
 
-        return fitter
-
-    def learnCalibration(self, attr, calibrationPlan, curvetype = "gain", dlo=50,dhi=50, binsize=1):
-        self.learnCalibrationRough(attr,calibrationPlan)
+    @_add_group_loop
+    def calibrateFollowingPlan(self, attr, curvetype = "gain", dlo=50,dhi=50, binsize=1):
         self.calibration = mass.EnergyCalibration(curvetype=curvetype)
         self.calibration.uncalibratedName = attr
         fitters = []
-        for (ph, energy, name, states) in zip(calibrationPlan.uncalibratedVals, calibrationPlan.calibratedVals,
-                                      calibrationPlan.names, calibrationPlan.states):
+        for (ph, energy, name, states) in zip(self.calibrationPlan.uncalibratedVals, self.calibrationPlan.energies,
+                                      self.calibrationPlan.names, self.calibrationPlan.states):
             if name in mass.fitter_classes:
                 fitter = self.linefit(name, "energyRough", states, dlo=dlo, dhi=dhi,
                                 plot=False, binsize=binsize)
@@ -436,52 +478,57 @@ class Channel():
                                 plot=False, binsize=binsize)
             fitters.append(fitter)
             if not fitter.fit_success or np.abs(fitter.last_fit_params_dict["peak_ph"][0]-energy)>10:
-                self.markSelfBad("failed fit", fitter, extraInfo = fitter)
+                self.markBad("failed fit", extraInfo = fitter)
                 continue
             phRefined = self.calibrationRough.energy2ph(fitter.last_fit_params_dict["peak_ph"][0])
             self.calibration.add_cal_point(phRefined, energy, name)
         return fitters
 
-    def learnCalibrationRough(self, attr, calibrationPlan):
-        self.calibrationRough = calibrationPlan.getRoughCalibration()
-        assert(hasattr(self, attr))
-        self.calibrationRough.uncalibratedName = attr
-        self.calibrationRoughPlan = calibrationPlan
-
-    def learnCalibrationInRefChannelUnits(self, calibrationPlan):
-        pass
-
-    def markSelfBad(self, reason, extraInfo = None):
-        self.markedBadReson = reason
+    def markBad(self, reason, extraInfo = None):
+        self.markedBadReason = reason
         self.markedBadExtraInfo = extraInfo
         self.markedBadBool = True
-        print("MARK SELF BAD REQUESTED, BUT NOT IMPLMENTED: \nreason: {}\n self: {}\nextraInfo: {}".format(self,
-                                                                                               reason, extraInfo))
+        print("MARK BAD {}: \nreason: {}\nextraInfo: {}".format(self, reason, extraInfo))
 
     def plotResidualStdDev(self, axis = None):
         if axis is None:
             plt.figure()
-            ax = plt.gca()
+            axis = plt.gca()
         x = np.sort(ds.residualStdDev)/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"]
         y = np.linspace(0,1,len(self))
         inds = x>(self.stdDevResThreshold/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"])
-        plt.plot(x,y, label="<threshold")
-        plt.plot(x[inds], y[inds], "r", label=">threshold")
-        plt.vlines(self.stdDevResThreshold/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"], 0, 1)
-        plt.xlabel("residualStdDev/noiseStdDev")
-        plt.ylabel("fraction of pulses with equal or lower residualStdDev")
-        plt.title("{}, {} total pulses, {:0.3f} cut".format(
+        axis.plot(x,y, label="<threshold")
+        axis.plot(x[inds], y[inds], "r", label=">threshold")
+        axis.vlines(self.stdDevResThreshold/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"], 0, 1)
+        axis.set_xlabel("residualStdDev/noiseStdDev")
+        axis.set_ylabel("fraction of pulses with equal or lower residualStdDev")
+        axis.set_title("{}, {} total pulses, {:0.3f} cut".format(
             self.shortName, len(self), inds.sum()/float(len(self)) ))
-        plt.legend()
-        plt.xlim(max(0,x[0]), 1.5)
-        plt.ylim(0,1)
+        axis.legend()
+        axis.set_xlim(max(0,x[0]), 1.5)
+        axis.set_ylim(0,1)
 
     def __len__(self):
         return len(self.offFile)
 
-    def alignToReferenceChannel(self, referenceChannel):
-        # is referenceChannel calibrated?
-        refPlan = referenceChannel.calibrationRoughPlan
+    @_add_group_loop
+    def alignToReferenceChannel(self, referenceChannel, attr, binEdges, _peakLocs=None):
+        if _peakLocs is None:
+            assert(len(referenceChannel.calibrationPlan.uncalibratedVals)>0)
+            peakLocs = referenceChannel.calibrationPlan.uncalibratedVals
+        else:
+            peakLocs = _peakLocs
+        self.aligner = AlignBToA(ds_a=referenceChannel, ds_b=self,
+                            peak_xs_a=peakLocs, bin_edges=binEdges, attr="filtValueDC")
+        self.calibrationArbsInRefChannelUnits=self.aligner.getCalBtoA()
+        if _peakLocs is None and not (self is referenceChannel):
+            self.calibrationPlanInit(referenceChannel.calibrationPlanAttr)
+            refCalPlan = referenceChannel.calibrationPlan
+            for (ph, energy, name, states) in zip(refCalPlan.uncalibratedVals, refCalPlan.energies,
+                                          refCalPlan.names, refCalPlan.states):
+                self.calibrationPlanAddPoint(self.calibrationArbsInRefChannelUnits.energy2ph(ph),
+                                             name, states, energy)
+        return self.aligner
 
 
 class AlignBToA():
@@ -498,7 +545,6 @@ class AlignBToA():
         self.normalize_before_dtw = normalize_before_dtw
         self.states = states
         self.peak_inds_b = self.samePeaks()
-        self.addCalToB()
 
     def samePeaks(self):
         ph_a = getattr(self.ds_a,self.attr)[self.ds_a.choose(self.states)]
@@ -566,13 +612,13 @@ class AlignBToA():
     def normalize(self,x):
         return x/float(np.sum(x))
 
-    def addCalToB(self):
+    def getCalBtoA(self):
         cal_b_to_a = mass.EnergyCalibration(curvetype="gain")
         for pi_a,pi_b in zip(self.peak_inds_a, self.peak_inds_b):
             cal_b_to_a.add_cal_point(self.bin_centers[pi_b], self.bin_centers[pi_a])
         cal_b_to_a.uncalibratedName = self.attr
-        self.ds_b.calibrationArbsInRefChannelUnits=cal_b_to_a
         self.cal_b_to_a = cal_b_to_a
+        return self.cal_b_to_a
 
     def testForGoodnessBasedOnCalCurvature(self, threshold_frac = .1):
         assert threshold_frac > 0
@@ -609,24 +655,25 @@ class AlignBToA():
 class CalibrationPlan():
     def __init__(self):
         self.uncalibratedVals = np.zeros(0)
-        self.calibratedVals = np.zeros(0)
+        self.energies = np.zeros(0)
         self.states = []
         self.names = []
 
-    def addCalPoint(self, uncalibratedVal, nameOrCalibratedVal, states=None, name=""):
+    def addCalPoint(self, uncalibratedVal,  name, states=None, energy=None):
+        _energy=None
+        if name in mass.spectrum_classes:
+            _energy = mass.spectrum_classes[name]().peak_energy
+        elif name in mass.STANDARD_FEATURES:
+            _energy = mass.STANDARD_FEATURES[name]
+        if _energy is not None:
+            if (energy is not None) and (energy != _energy):
+                raise(Exception("found energy={} from {}, do not pass a value to energy".format(_energy, name)))
+            energy=_energy
+        if energy is None:
+            raise(Exception("name not found in mass.spectrum_classes or mass.STANDARD_FEATURES, pass energy"))
         self.uncalibratedVals = np.hstack((self.uncalibratedVals, uncalibratedVal))
-        if isinstance(nameOrCalibratedVal, str):
-            name = nameOrCalibratedVal
-            if name in mass.spectrum_classes:
-                calibratedVal = mass.spectrum_classes[name]().peak_energy
-            elif name in mass.STANDARD_FEATURES:
-                calibratedVal = mass.STANDARD_FEATURES[name]
-            self.names.append(name)
-            self.calibratedVals = np.hstack((self.calibratedVals, calibratedVal))
-        else:
-            calibratedVal = nameOrCalibratedVal
-            self.calibratedVals = np.hstack((self.calibratedVals, calibratedVal))
-            self.names.append(name)
+        self.names.append(name)
+        self.energies = np.hstack((self.energies, energy))
         self.states.append(states)
 
     def __repr__(self):
@@ -634,12 +681,12 @@ class CalibrationPlan():
         x: {}
         y: {}
         states: {}
-        names: {}""".format(len(self.names),self.uncalibratedVals, self.calibratedVals, self.states, self.names)
+        names: {}""".format(len(self.names),self.uncalibratedVals, self.energies, self.states, self.names)
         return s
 
     def getRoughCalibration(self):
         cal = mass.EnergyCalibration(curvetype="gain")
-        for (x,y,name) in zip(self.uncalibratedVals, self.calibratedVals, self.names):
+        for (x,y,name) in zip(self.uncalibratedVals, self.energies, self.names):
             cal.add_cal_point(x,y,name)
         return cal
 
@@ -668,13 +715,18 @@ class SilenceBar(progress.bar.Bar):
             progress.bar.Bar.finish(self)
 
 
-class ChannelGroup(GroupLooper, collections.OrderedDict):
+class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
     def __init__(self, offFileNames, verbose=True):
         collections.OrderedDict.__init__(self)
         self.verbose = verbose
         self.offFileNames = offFileNames
         self.experimentStateFile = ExperimentStateFile(offFilename=self.offFileNames[0])
         self.loadChannels()
+
+    @property
+    def shortName(self):
+        basename, self.channum = mass.ljh_util.ljh_basename_channum(self.offFileNames[0])
+        return os.path.split(basename)[-1] + " {} chans".format(len(self))
 
     def loadChannels(self):
         bar = SilenceBar('Parse OFF File Headers', max=len(self.offFileNames), silence=not self.verbose)
@@ -687,19 +739,62 @@ class ChannelGroup(GroupLooper, collections.OrderedDict):
     def __repr__(self):
         return "ChannelGroup with {} channels".format(len(self))
 
-    def alignToReferenceChannel(self, referenceChannelNumber=None):
-        if referenceChannelNumber is None:
-            ref = self.firstGoodChannel()
-        else:
-            ref = self[referenceChannelNumber]
-        bar = SilenceBar('alignToReferenceChannel', max=len(self.offFileNames), silence=not self.verbose)
-        for (channum, ds) in self.items():
-            ds.alignToReferenceChannel(ds)
-            bar.next()
-        bar.finish()
-
     def firstGoodChannel(self):
         return self[1]
+
+    def hist(self, binEdges, attr, states=None, g_func=None):
+        """return a tuple of (bin_centers, counts) of p_energy of good pulses (or another attribute). automatically filtes out nan values
+        binEdges -- edges of bins unsed for histogram
+        attr -- which attribute to histogram eg "filt_value"
+        g_func -- a function a function taking a MicrocalDataSet and returnning a vector like ds.choose() would return
+            This vector is anded with the vector from ds.choose
+         """
+        binCenters, countsdict = self.hists(binEdges, attr, states, g_func)
+        counts = np.zeros_like(binCenters, dtype="int")
+        for (k,v) in countsdict.items():
+            counts+=v
+        return binCenters, counts
+
+    def hists(self, binEdges, attr, states=None, g_func=None, channums=None):
+        binEdges = np.array(binEdges)
+        binCenters = 0.5*(binEdges[1:]+binEdges[:-1])
+        countsdict = collections.OrderedDict()
+        if channums is None:
+            channums = self.keys()
+        for channum in channums:
+            _, countsdict[channum] = self[channum].hist(binEdges, attr, states, g_func)
+        return binCenters, countsdict
+
+    @property
+    def whyChanBad(self):
+        w = collections.OrderedDict()
+        for (channum, ds) in self.items():
+            if ds.markedBadBool:
+                w[channum] = ds.markedBadReason
+
+    def plotHists(self,binEdges,attr,axis=None,labelLines=[],states=None,
+                  g_func=None, maxChans = 8, channums = None):
+        if channums is None:
+            channums = self.keys()[:min(maxChans, len(self))]
+        if axis is None:
+            plt.figure()
+            axis = plt.gca()
+        if states is None:
+            states = self.stateLabels
+        for channum in channums:
+            ds=self[channum]
+            ds.plotHist(binEdges, attr, axis, [], states, g_func)
+            line = axis.lines[-1]
+            line.set_label("{}".format(channum))
+            if ds.markedBadBool:
+                line.set_dashes([2,2,10,2])
+        axis.set_title(self.shortName + ", states = {}".format(states))
+        axis.legend()
+        annotate_lines(axis, labelLines)
+
+
+
+
 
 
 
@@ -718,32 +813,42 @@ ds.plotResidualStdDev()
 driftCorrectInfo = ds.learnDriftCorrection()
 ds.plotCompareDriftCorrect()
 
-# filt value, line name or energy, states, name
-calibrationPlan = CalibrationPlan()
-calibrationPlan.addCalPoint(3404, "Ne He-Like 1s2p", states="B")
-calibrationPlan.addCalPoint(3768, "Ne H-Like 2p", states="B")
-calibrationPlan.addCalPoint(7869, 2181.4, states="C", name = "W Ni-8")
-ds.learnCalibrationRough("filtValueDC",calibrationPlan)
-fitters = ds.learnCalibration("filtValueDC",calibrationPlan) # overwrites calibrationRough
-
-
-
-
+ds.calibrationPlanInit("filtValueDC")
+ds.calibrationPlanAddPoint(3404, "Ne He-Like 1s2p", states="B")
+ds.calibrationPlanAddPoint(3768, "Ne H-Like 2p", states="B")
+ds.calibrationPlanAddPoint(7880, "W Ni-8", states="C", energy=2181.4)
+# at this point energyRough should work
 ds.plotHist(np.arange(0,4000,1),"energyRough", coAddStates=False)
-
+fitters = ds.calibrateFollowingPlan("filtValueDC")
 ds.linefit("Ne H-Like 2p",attr="energy",states="B")
 ds.linefit("Ne He-Like 1s2p",attr="energy",states="B")
 ds.linefit(2181.4,attr="energy",states="C")
-# bake in energyRough and arbUnitsOfReferenceChannel
-# linefit
-# execute calibration plan
-
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
+# now energy should work
+# calibrationPlan = CalibrationPlan()
+# calibrationPlan.addCalPoint(3404, "Ne He-Like 1s2p", states="B")
+# calibrationPlan.addCalPoint(3768, "Ne H-Like 2p", states="B")
+# calibrationPlan.addCalPoint(7880, 2181.4, states="C", name = "W Ni-8")
+# ds.learnCalibrationRough("filtValueDC",calibrationPlan)
+# fitters = ds.learnCalibration("filtValueDC",calibrationPlan) # overwrites calibrationRough
 
-aligner = AlignBToA(ds, data[3], calibrationPlan.uncalibratedVals, np.arange(500,20000,4), "filtValueDC")
+
+
+
+# aligner =
+
+ds3 = data[3]
+data.alignToReferenceChannel(referenceChannel=ds,
+                             binEdges=np.arange(500,20000,4), attr="filtValueDC")
+aligner = ds3.aligner
 aligner.samePeaksPlot()
 aligner.samePeaksPlotWithAlignmentCal()
 
+fitters = data.calibrateFollowingPlan("filtValueDC", _rethrow=True)
+data.hist(np.arange(0,4000,1), "energy")
+data.plotHist(np.arange(0,4000,1),"energy", coAddStates=False)
+data.plotHists(np.arange(0,16000,4),"arbsInRefChannelUnits")
+data.plotHists(np.arange(0,4000,1),"energy")
 
 plt.show()
