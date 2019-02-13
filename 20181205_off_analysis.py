@@ -10,6 +10,7 @@ import pylab as plt
 import progress.bar
 import inspect
 import fastdtw
+import h5py
 
 plt.close("all")
 maxChans = 240
@@ -482,13 +483,17 @@ class Channel(CorG):
                 continue
             phRefined = self.calibrationRough.energy2ph(fitter.last_fit_params_dict["peak_ph"][0])
             self.calibration.add_cal_point(phRefined, energy, name)
+        self.fittersFromCalibrateFollowingPlan = fitters
         return fitters
 
     def markBad(self, reason, extraInfo = None):
         self.markedBadReason = reason
         self.markedBadExtraInfo = extraInfo
         self.markedBadBool = True
-        print("MARK BAD {}: \nreason: {}\nextraInfo: {}".format(self, reason, extraInfo))
+        s="\nMARK BAD {}\nreason: {}".format(self.shortName, reason)
+        if extraInfo is not None:
+            s+="\nextraInfo: {}".format(extraInfo)
+        print(s)
 
     def plotResidualStdDev(self, axis = None):
         if axis is None:
@@ -519,7 +524,7 @@ class Channel(CorG):
         else:
             peakLocs = _peakLocs
         self.aligner = AlignBToA(ds_a=referenceChannel, ds_b=self,
-                            peak_xs_a=peakLocs, bin_edges=binEdges, attr="filtValueDC")
+                            peak_xs_a=peakLocs, bin_edges=binEdges, attr=attr)
         self.calibrationArbsInRefChannelUnits=self.aligner.getCalBtoA()
         if _peakLocs is None and not (self is referenceChannel):
             self.calibrationPlanInit(referenceChannel.calibrationPlanAttr)
@@ -530,6 +535,37 @@ class Channel(CorG):
                                              name, states, energy)
         return self.aligner
 
+    @_add_group_loop
+    def lineQualityCheck(self, line, positionToleranceFitSigma, worstAllowedFWHM, attr="energy", states=None,
+                          dlo=50, dhi=50, binsize=1, binEdges=None, guessParams=None,
+                          g_func=None, holdvals=None):
+        """calls ds.linefit to fit the given line
+        marks self bad if the fit position is more than toleranceFitSigma*fitSigma away
+        from the correct position
+        """
+        fitter = ds.linefit(line, attr, states, None, dlo, dhi, binsize, binEdges, False,
+                            guessParams, g_func, holdvals)
+        fitPos, fitSigma = fitter.last_fit_params_dict["peak_ph"]
+        tolerance = fitSigma*positionToleranceFitSigma
+        resolution, _ = fitter.last_fit_params_dict["resolution"]
+        if np.abs(fitPos-fitter.spect.peak_energy)>tolerance:
+            self.markBad("lineQualityCheck: for {}, want {} within {}, got {}".format(
+                line, fitter.spect.peak_energy, tolerance, fitPos))
+        if resolution>worstAllowedFWHM:
+            self.markBad("lineQualityCheck: for {}, fit resolution {} > threshold {}".format(
+                line, resolution, worstAllowedFWHM))
+        return fitter
+
+    def histsToHDF5(self, h5File, binEdges, attr="energy", g_func=None):
+        grp = h5File.require_group(str(self.channum))
+        for state in ds.stateLabels: #hist for each state
+            binCenters, counts = self.hist(binEdges, attr, state, g_func)
+            grp["{}/bin_centers".format(state)] = binCenters
+            grp["{}/counts".format(state)] = counts
+        binCenters, counts = self.hist(binEdges, attr, g_func=g_func) # all states hist
+        grp["bin_centers_ev"]=binCenters
+        grp["counts"] = counts
+        grp["name_of_energy_indicator"] = attr
 
 class AlignBToA():
     cm = plt.cm.gist_ncar
@@ -716,11 +752,22 @@ class SilenceBar(progress.bar.Bar):
 
 
 class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
+    """
+    ChannelGroup is an OrdredDict of Channels with some additional features
+    1. Most functions on a Channel can be called on a ChannelGroup, eg data.learnDriftCorrection()
+    in this case it looks over all channels in the ChannelGroup, except those makred bad by ds.markBad("reason")
+    2. If you want to iterate over all Channels, even those marked bad, do
+    with data.includeBad:
+        for (channum, ds) in data:
+            print(channum) # will include bad channels
+    3. data.whyChanBad returns an OrderedDict of bad channel numbers and reason
+    """
     def __init__(self, offFileNames, verbose=True):
         collections.OrderedDict.__init__(self)
         self.verbose = verbose
         self.offFileNames = offFileNames
         self.experimentStateFile = ExperimentStateFile(offFilename=self.offFileNames[0])
+        self._includeBad=False
         self.loadChannels()
 
     @property
@@ -767,10 +814,12 @@ class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
 
     @property
     def whyChanBad(self):
-        w = collections.OrderedDict()
-        for (channum, ds) in self.items():
-            if ds.markedBadBool:
-                w[channum] = ds.markedBadReason
+        with self.includeBad():
+            w = collections.OrderedDict()
+            for (channum, ds) in self.items():
+                if ds.markedBadBool:
+                    w[channum] = ds.markedBadReason
+            return w
 
     def plotHists(self,binEdges,attr,axis=None,labelLines=[],states=None,
                   g_func=None, maxChans = 8, channums = None):
@@ -792,14 +841,57 @@ class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
         axis.legend()
         annotate_lines(axis, labelLines)
 
+    def __iter__(self):
+        if self._includeBad:
+            return collections.OrderedDict.__iter__(self)
+        else:
+            return (channum for channum in collections.OrderedDict.__iter__(self) if not self[channum].markedBadBool)
+
+    def __len__(self):
+        return len([k for k in self])
+
+    def includeBad(self, x = True):
+        """
+        Use this to do iteration including bad channels temporarily, eg:
+
+        with data.includeBad():
+            for (channum, ds) in data.items():
+                print(ds)
+        """
+        self._includeBadDesired = x
+        return self
+
+    def __enter__(self):
+        self._includeBad = self._includeBadDesired
+
+    def __exit__(self, *args):
+        self._includeBad = False
+        self._includeBadDesired = False
+
+    def histsToHDF5(self, h5File, binEdges, attr="energy", g_func=None):
+        for (channum, ds) in self.items():
+            ds.histsToHDF5(h5File, binEdges, attr, g_func)
+        grp = h5File.require_group("all_channels")
+        for state in ds.stateLabels: #hist for each state
+            binCenters, counts = self.hist(binEdges, attr, state, g_func)
+            grp["{}/bin_centers".format(state)] = binCenters
+            grp["{}/counts".format(state)] = counts
+        binCenters, counts = ds.hist(binEdges, attr, g_func=g_func) # all states hist
+        grp["bin_centers_ev"]=binCenters
+        grp["counts"] = counts
+        grp["name_of_energy_indicator"] = attr
 
 
-
-
-
-
-
-
+def plotFitters(fitters):
+    fig = plt.figure(figsize=(12,12))
+    n = int(np.ceil(np.sqrt(len(fitters))))
+    for i,fitter in enumerate(fitters):
+        ax = plt.subplot(n,n,i+1)
+        fitter.plot(axis=ax)
+        if isinstance(fitter, mass.GaussianFitter):
+            plt.title("GaussianFitter (energy?)")
+        else:
+            plt.title(type(fitter.spect).__name__)
 
 data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=4))
 data.learnDriftCorrection()
@@ -846,9 +938,20 @@ aligner.samePeaksPlot()
 aligner.samePeaksPlotWithAlignmentCal()
 
 fitters = data.calibrateFollowingPlan("filtValueDC", _rethrow=True)
+fitters = data.lineQualityCheck("Ne H-Like 2p", positionToleranceFitSigma=4, worstAllowedFWHM=4, _rethrow=True)
 data.hist(np.arange(0,4000,1), "energy")
 data.plotHist(np.arange(0,4000,1),"energy", coAddStates=False)
 data.plotHists(np.arange(0,16000,4),"arbsInRefChannelUnits")
 data.plotHists(np.arange(0,4000,1),"energy")
+
+
+
+
+
+with h5py.File("temp","w") as h5:
+    data.histsToHDF5(h5, np.arange(4000))
+with h5py.File("temp","r") as h5:
+    print(h5.keys())
+# write manifest to hdf5
 
 plt.show()
