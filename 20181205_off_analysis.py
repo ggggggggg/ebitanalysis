@@ -120,6 +120,7 @@ def annotate_lines(axis,labelLines, labelLines_color2=[],color1 = "k",color2="r"
             axis.annotate(labelLine, (energy, np.exp((2+i+j)*np.log(plt.ylim()[1])/float(1.5*n))), xycoords="data",color=color2)
 
 class DriftCorrection():
+    version = 1
     def __init__(self, indicatorName, uncorrectedName, medianIndicator, slope):
         self.indicatorName = indicatorName
         self.uncorrectedName = uncorrectedName
@@ -130,12 +131,22 @@ class DriftCorrection():
         gain = 1+(indicator-self.medianIndicator)*self.slope
         return gain*uncorrected
 
-    def toHDF5(self, h5):
-        pass
+    def toHDF5(self, hdf5_group, name="driftCorrection"):
+        hdf5_group["{}/indicatorName".format(name)] = self.indicatorName
+        hdf5_group["{}/uncorrectedName".format(name)] = self.uncorrectedName
+        hdf5_group["{}/medianIndicator".format(name)] = self.medianIndicator
+        hdf5_group["{}/slope".format(name)] = self.slope
+        hdf5_group["{}/version".format(name)] = self.version
 
-    # this can't be an instance method, maybe a class method? or just a function
-    def fromHDF5(self):
-        pass
+    @classmethod
+    def fromHDF5(self, hdf5_group, name="driftCorrection"):
+        indicatorName = hdf5_group["{}/indicatorName".format(name)].value
+        uncorrectedName = hdf5_group["{}/uncorrectedName".format(name)].value
+        medianIndicator = hdf5_group["{}/medianIndicator".format(name)].value
+        slope = hdf5_group["{}/slope".format(name)].value
+        version = hdf5_group["{}/version".format(name)].value
+        assert(version==self.version)
+        return DriftCorrection(indicatorName, uncorrectedName, medianIndicator, slope)
 
 class GroupLooper(object):
     """A mixin class to allow ChannelGroup objects to hold methods that loop over
@@ -354,6 +365,10 @@ class Channel(CorG):
     def relTimeSec(self):
         t = self.offFile["unixnano"]
         return (t-t[0])/1e9
+
+    @property
+    def unixnano(self):
+        return self.offFile["unixnano"]
 
     @property
     def filtValue(self):
@@ -948,10 +963,55 @@ data.plotHists(np.arange(0,4000,1),"energy")
 
 
 
+def recipeToHDF5(self,h5File):
+    grp = h5File.require_group(str(self.channum))
+    self.driftCorrection.toHDF5(grp)
+    self.calibration.save_to_hdf5(grp,"calibration")
+    grp["calibration/uncalibratedName"] = self.calibration.uncalibratedName
+    self.calibrationRough.save_to_hdf5(grp,"calibrationRough")
+    grp["calibrationRough/uncalibratedName"] = self.calibrationRough.uncalibratedName
+    self.calibrationArbsInRefChannelUnits.save_to_hdf5(grp,"calibrationArbsInRefChannelUnits")
+    grp["calibrationArbsInRefChannelUnits/uncalibratedName"] = self.calibrationArbsInRefChannelUnits.uncalibratedName
+
+def recipeFromHDF5(self, h5File):
+    grp = h5File.require_group(str(self.channum))
+    self.driftCorrection = DriftCorrection.fromHDF5(grp)
+    self.calibration = mass.EnergyCalibration.load_from_hdf5(grp,"calibration")
+    self.calibration.uncalibratedName = grp["calibration/uncalibratedName"].value
+    self.calibrationRough = mass.EnergyCalibration.load_from_hdf5(grp,"calibrationRough")
+    self.calibrationRough.uncalibratedName = grp["calibrationRough/uncalibratedName"].value
+    self.calibrationArbsInRefChannelUnits =  mass.EnergyCalibration.load_from_hdf5(grp,"calibrationArbsInRefChannelUnits")
+    self.calibrationArbsInRefChannelUnits.uncalibratedName = grp["calibrationArbsInRefChannelUnits/uncalibratedName"].value
+
+def energyTimestampLabelToHDF5(self, h5File):
+    grp = h5File.require_group(str(self.channum))
+    energy = ds.energy
+    unixnano = ds.unixnano
+    if len(ds.stateLabels)>0:
+        for state in ds.stateLabels:
+            g = ds.choose(states=state)
+            grp["{}/energy".format(state)]=energy[g]
+            grp["{}/unixnano".format(state)]=unixnano[g]
+    else:
+        g = ds.choose()
+        grp["{}/energy".format(state)]=energy[g]
+        grp["{}/unixnano".format(state)]=unixnano[g]
+
+Channel.recipeToHDF5 = recipeToHDF5
+Channel.recipeFromHDF5 = recipeFromHDF5
+Channel.energyTimestampLabelToHDF5 = energyTimestampLabelToHDF5
+
 with h5py.File("temp","w") as h5:
     data.histsToHDF5(h5, np.arange(4000))
+    ds.recipeToHDF5(h5)
+    ds.energyTimestampLabelToHDF5(h5)
+
 with h5py.File("temp","r") as h5:
     print(h5.keys())
-# write manifest to hdf5
+    newds = Channel(ds.offFile, ds.experimentStateFile)
+    newds.recipeFromHDF5(h5)
+# to hdf5
+# timestamp, energy, label
+# drift correction, calibrations
 
 plt.show()

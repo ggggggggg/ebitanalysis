@@ -37,7 +37,6 @@ class AlignBToA():
         i_a = [x[0] for x in path]
         i_b_median_scaled = [x[1] for x in path]
         peak_inds_b_median_scaled = [i_b_median_scaled[i_a.index(pia)] for pia in self.peak_inds_a]
-        peak_xs_b = peak_xs_b_median_scaled/median_ratio_a_over_b
         min_bin = self.bin_edges[0]
         bin_spacing = self.bin_edges[1]-self.bin_edges[0]
         peak_inds_b = map(int,(peak_xs_b-min_bin)/bin_spacing)
