@@ -270,7 +270,7 @@ O LINES
 # H-like
 mass.addfitter(
 element="O",
-linetype=" H-Like 2p 2P1/2+2P3/2",
+linetype=" H-Like 2p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
@@ -283,12 +283,25 @@ ka12_energy_diff=None
 
 mass.addfitter(
 element="O",
-linetype=" H-Like 3p 2P1/2+2P3/2",
+linetype=" H-Like 3p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
 nominal_peak_energy=(774.634043*2+774.578843*1)/3,
 energies=np.array([774.634043, 774.578843]), lorentzian_fwhm=np.array([0.1,0.1]),
+reference_amplitude=np.array([2,1]),
+reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT,
+ka12_energy_diff=None
+)
+
+mass.addfitter(
+element="O",
+linetype=" H-Like 4p",
+reference_short='NIST ASD',
+fitter_type = mass.line_fits.GenericKBetaFitter,
+reference_plot_gaussian_fwhm=0.5,
+nominal_peak_energy=(816.974368*2+816.951082*1)/3,
+energies=np.array([816.951082, 816.974368]), lorentzian_fwhm=np.array([0.1,0.1]),
 reference_amplitude=np.array([2,1]),
 reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT,
 ka12_energy_diff=None
@@ -303,7 +316,7 @@ fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
 nominal_peak_energy=573.94777,
 energies=np.array([560.983, 568.551, 573.94777]), lorentzian_fwhm=np.array([0.1,0.1,0.1]),
-reference_amplitude=np.array([1,1,10]),
+reference_amplitude=np.array([4,1,20]),
 reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT,
 ka12_energy_diff=None,
 reference_measurement_type = "Theory"
@@ -371,7 +384,7 @@ Ne LINES
 # H-like
 mass.addfitter(
 element="Ne",
-linetype=" H-Like 2p 2P1/2+2P3/2",
+linetype=" H-Like 2p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
@@ -385,7 +398,7 @@ reference_measurement_type = "Theory"
 
 mass.addfitter(
 element="Ne",
-linetype=" H-Like 3p 2P1/2+2P3/2",
+linetype=" H-Like 3p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
@@ -399,7 +412,7 @@ reference_measurement_type = "Theory"
 
 mass.addfitter(
 element="Ne",
-linetype=" H-Like 4p 2P1/2+2P3/2",
+linetype=" H-Like 4p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
@@ -420,7 +433,7 @@ fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
 nominal_peak_energy=922.0159,
 energies=np.array([905.0772, 914.8174, 922.0159]), lorentzian_fwhm=np.array([0.1,0.1,0.1]),
-reference_amplitude=np.array([1,1,10]),
+reference_amplitude=np.array([4,1,20]),
 reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT,
 ka12_energy_diff=None,
 reference_measurement_type = "Theory"
@@ -474,7 +487,7 @@ Ar LINES
 # H-like
 mass.addfitter(
 element="Ar",
-linetype=" H-Like 2p 2P1/2+2P3/2",
+linetype=" H-Like 2p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
@@ -488,7 +501,7 @@ reference_measurement_type = "Theory"
 
 mass.addfitter(
 element="Ar",
-linetype=" H-Like 3p 2P1/2+2P3/2",
+linetype=" H-Like 3p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
@@ -502,7 +515,7 @@ reference_measurement_type = "Theory"
 
 mass.addfitter(
 element="Ar",
-linetype=" H-Like 4p 2P1/2+2P3/2",
+linetype=" H-Like 4p",
 reference_short='NIST ASD',
 fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
@@ -523,7 +536,7 @@ fitter_type = mass.line_fits.GenericKBetaFitter,
 reference_plot_gaussian_fwhm=0.5,
 nominal_peak_energy=3139.5824,
 energies=np.array([3104.1486, 3123.5346, 3139.5824]), lorentzian_fwhm=np.array([0.1,0.1,0.1]),
-reference_amplitude=np.array([1,1,10]),
+reference_amplitude=np.array([4,1,20]),
 reference_amplitude_type=mass.calibration.LORENTZIAN_PEAK_HEIGHT,
 ka12_energy_diff=None,
 reference_measurement_type = "Theory"
