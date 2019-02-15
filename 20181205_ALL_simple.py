@@ -16,7 +16,7 @@ import time
 import fastdtw
 import scipy
 import collections
-import ebit
+import ebit_old as ebit
 import shutil
 
 maxChans = 240
@@ -314,12 +314,20 @@ if not os.path.isdir(outputDirName):
     os.mkdir(outputDirName)
 with h5py.File(os.path.join(outputDirName,outputDirName+"_prelim.h5"),"w") as h5:
     for injection in data.cut_field_categories("injection"):
-        bin_centers, counts = data.hist(np.arange(4000),category={"injection":injection})
-        h5["bin_centers_{}".format(injection)]=bin_centers
-        h5["counts_{}".format(injection)]=counts
-        np.savetxt(os.path.join(outputDirName,outputDirName+"_prelim_{}.yuri".format(injection)),
-        np.vstack((bin_centers,counts)).T,
-        header="#bin_centers (eV), counts")
+        if injection == "CO2, 2.0 kV" or injection == "Ir, 15.06 kV":
+
+            bin_centers, counts = data.hist(np.arange(4000),category={"injection":injection})
+            h5["bin_centers_{}".format(injection)]=bin_centers
+            h5["counts_{}".format(injection)]=counts
+            np.savetxt(os.path.join(outputDirName,outputDirName+"_prelim_{}.yuri".format(injection)),
+            np.vstack((bin_centers,counts)).T,
+            header="#bin_centers (eV), counts")
+            for ds in data:
+                bin_centers, counts = ds.hist(np.arange(4000),category={"injection":injection})
+                h5["{}/bin_centers_{}".format(ds.channum, injection)] = bin_centers
+                h5["{}/counts_{}".format(ds.channum, injection)] = counts
+
+
 
 for i in plt.get_fignums():
     plt.figure(i)

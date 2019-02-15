@@ -12,23 +12,6 @@ import inspect
 import fastdtw
 import h5py
 
-plt.close("all")
-maxChans = 240
-delete_hdf5_file_before_analysis = True
-filtValueChoice = "p_filt_value_dc" # use p_filt_value mostly, try p_filt_value_dc on longer, higher count-rate datasets
-referenceChannelNumber = 3
-referenceLines = collections.OrderedDict() # map filt value or either energy or line name
-referenceLines[2002]="O He-Like 1s2p + 1s2s"
-referenceLines[2278]="O H-Like 2p"
-referenceLines[2693]="O H-Like 3p"
-energyResolutionThreshold = 4.8
-energyResolutionThresholdLine = "O H-Like 2p"
-binEdgesFiltValue = np.arange(100,8000,4)
-switchTimestamp = 1544064607.7870846
-
-dirname = "/Users/oneilg/Documents/EBIT/data/20181205_BC"
-filename = "/Users/oneilg/Documents/EBIT/data/20181205_BC/20181205_BC_chan1.off"
-
 class ExperimentStateFile():
     def __init__(self, filename=None, offFilename=None, excludeStart = True, excludeEnd = True):
         if filename is not None:
@@ -66,6 +49,7 @@ class ExperimentStateFile():
         self.allLabels = labels
         self.unixnanos = np.array(unixnanos)
         self.labels = self.applyExcludesToLabels(self.allLabels)
+        self._labels = self.labels[:]
 
     def applyExcludesToLabels(self, allLabels):
         return [l for l in self.allLabels if (not self.excludeEnd or l!="END") and (not self.excludeStart or l!="START")]
@@ -80,9 +64,7 @@ class ExperimentStateFile():
         statesDict = collections.OrderedDict()
         inds = np.searchsorted(unixnanos, self.unixnanos)
         for i, label in enumerate(self.allLabels):
-            if label == "START" and self.excludeStart:
-                continue
-            if label == "END" and self.excludeEnd:
+            if label not in self._labels:
                 continue
             if not label in statesDict:
                 statesDict[label] = np.zeros(len(unixnanos),dtype="bool")
@@ -90,11 +72,17 @@ class ExperimentStateFile():
                 statesDict[label][inds[i]:len(unixnanos)]=True
             else:
                 statesDict[label][inds[i]:inds[i+1]]=True
-        assert(self.labels==statesDict.keys())
+            # add aliases
+            j = self._labels.index(label)
+            statesDict[self.labels[j]]=statesDict[label] # add aliases
         return statesDict
 
     def __repr__(self):
         return "ExperimentStateFile: "+self.filename
+
+    def aliasState(self, state, alias):
+        i = self.labels.index(state)
+        self.labels[i]=alias
 
 
 def annotate_lines(axis,labelLines, labelLines_color2=[],color1 = "k",color2="r"):
@@ -202,6 +190,7 @@ def _add_group_loop(method):
     wrapper.__doc__ = "\n".join(lines)
 
     setattr(GroupLooper, method_name, wrapper)
+    setattr(GroupLooper, "_"+method_name,wrapper)
     return method
 
 class CorG():
@@ -234,7 +223,7 @@ class CorG():
                 axis.plot(x,y,drawstyle="steps-mid", label=state)
         axis.set_xlabel(attr)
         axis.set_ylabel("counts per %0.1f unit bin"%(binEdges[1]-binEdges[0]))
-        plt.legend()
+        plt.legend(title="states")
         axis.set_title(self.shortName)
         annotate_lines(axis, labelLines)
 
@@ -412,7 +401,7 @@ class Channel(CorG):
         plt.xlabel(nameA)
         plt.ylabel(nameB)
         plt.title(self.shortName)
-        plt.legend()
+        plt.legend(title="states")
         return axis
 
     def hist(self, binEdges, attr, states=None, g_func=None):
@@ -467,7 +456,7 @@ class Channel(CorG):
         plt.xlabel(self.driftCorrection.indicatorName)
         plt.ylabel(self.driftCorrection.uncorrectedName +",filtValueDC")
         plt.title(self.shortName+" drift correct comparison")
-        plt.legend()
+        plt.legend(title="states")
         return axis
 
     def calibrationPlanInit(self, attr):
@@ -551,29 +540,29 @@ class Channel(CorG):
         return self.aligner
 
     @_add_group_loop
-    def lineQualityCheck(self, line, positionToleranceFitSigma, worstAllowedFWHM, attr="energy", states=None,
+    def qualityCheckLinefit(self, line, positionToleranceFitSigma, worstAllowedFWHM, attr="energy", states=None,
                           dlo=50, dhi=50, binsize=1, binEdges=None, guessParams=None,
                           g_func=None, holdvals=None):
         """calls ds.linefit to fit the given line
         marks self bad if the fit position is more than toleranceFitSigma*fitSigma away
         from the correct position
         """
-        fitter = ds.linefit(line, attr, states, None, dlo, dhi, binsize, binEdges, False,
+        fitter = self.linefit(line, attr, states, None, dlo, dhi, binsize, binEdges, False,
                             guessParams, g_func, holdvals)
         fitPos, fitSigma = fitter.last_fit_params_dict["peak_ph"]
         tolerance = fitSigma*positionToleranceFitSigma
         resolution, _ = fitter.last_fit_params_dict["resolution"]
         if np.abs(fitPos-fitter.spect.peak_energy)>tolerance:
-            self.markBad("lineQualityCheck: for {}, want {} within {}, got {}".format(
+            self.markBad("qualityCheckLinefit: for {}, want {} within {}, got {}".format(
                 line, fitter.spect.peak_energy, tolerance, fitPos))
         if resolution>worstAllowedFWHM:
-            self.markBad("lineQualityCheck: for {}, fit resolution {} > threshold {}".format(
+            self.markBad("qualityCheckLinefit: for {}, fit resolution {} > threshold {}".format(
                 line, resolution, worstAllowedFWHM))
         return fitter
 
     def histsToHDF5(self, h5File, binEdges, attr="energy", g_func=None):
         grp = h5File.require_group(str(self.channum))
-        for state in ds.stateLabels: #hist for each state
+        for state in self.stateLabels: #hist for each state
             binCenters, counts = self.hist(binEdges, attr, state, g_func)
             grp["{}/bin_centers".format(state)] = binCenters
             grp["{}/counts".format(state)] = counts
@@ -581,6 +570,41 @@ class Channel(CorG):
         grp["bin_centers_ev"]=binCenters
         grp["counts"] = counts
         grp["name_of_energy_indicator"] = attr
+
+    def recipeToHDF5(self,h5File):
+        grp = h5File.require_group(str(self.channum))
+        self.driftCorrection.toHDF5(grp)
+        self.calibration.save_to_hdf5(grp,"calibration")
+        grp["calibration/uncalibratedName"] = self.calibration.uncalibratedName
+        self.calibrationRough.save_to_hdf5(grp,"calibrationRough")
+        grp["calibrationRough/uncalibratedName"] = self.calibrationRough.uncalibratedName
+        self.calibrationArbsInRefChannelUnits.save_to_hdf5(grp,"calibrationArbsInRefChannelUnits")
+        grp["calibrationArbsInRefChannelUnits/uncalibratedName"] = self.calibrationArbsInRefChannelUnits.uncalibratedName
+
+    def recipeFromHDF5(self, h5File):
+        grp = h5File.require_group(str(self.channum))
+        self.driftCorrection = DriftCorrection.fromHDF5(grp)
+        self.calibration = mass.EnergyCalibration.load_from_hdf5(grp,"calibration")
+        self.calibration.uncalibratedName = grp["calibration/uncalibratedName"].value
+        self.calibrationRough = mass.EnergyCalibration.load_from_hdf5(grp,"calibrationRough")
+        self.calibrationRough.uncalibratedName = grp["calibrationRough/uncalibratedName"].value
+        self.calibrationArbsInRefChannelUnits =  mass.EnergyCalibration.load_from_hdf5(grp,"calibrationArbsInRefChannelUnits")
+        self.calibrationArbsInRefChannelUnits.uncalibratedName = grp["calibrationArbsInRefChannelUnits/uncalibratedName"].value
+
+    def energyTimestampLabelToHDF5(self, h5File):
+        grp = h5File.require_group(str(self.channum))
+        energy = ds.energy
+        unixnano = ds.unixnano
+        if len(ds.stateLabels)>0:
+            for state in ds.stateLabels:
+                g = ds.choose(states=state)
+                grp["{}/energy".format(state)]=energy[g]
+                grp["{}/unixnano".format(state)]=unixnano[g]
+        else:
+            g = ds.choose()
+            grp["{}/energy".format(state)]=energy[g]
+            grp["{}/unixnano".format(state)]=unixnano[g]
+
 
 class AlignBToA():
     cm = plt.cm.gist_ncar
@@ -641,7 +665,7 @@ class AlignBToA():
             plt.plot(self.bin_centers[pi],counts_b[pi],"o",color=self.cm(float(i)/len(self.peak_inds_b)))
         plt.xlabel(self.attr)
         plt.ylabel("counts per %0.2f unit bin"%(self.bin_centers[1]-self.bin_centers[0]))
-        plt.legend()
+        plt.legend(title="channel")
         plt.title(self.ds_a.shortName+" + "+self.ds_b.shortName+"\nwith same peaks noted, peaks not expected to be aligned in this plot")
 
     def samePeaksPlotWithAlignmentCal(self):
@@ -853,7 +877,7 @@ class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
             if ds.markedBadBool:
                 line.set_dashes([2,2,10,2])
         axis.set_title(self.shortName + ", states = {}".format(states))
-        axis.legend()
+        axis.legend(title="channel")
         annotate_lines(axis, labelLines)
 
     def __iter__(self):
@@ -887,14 +911,29 @@ class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
         for (channum, ds) in self.items():
             ds.histsToHDF5(h5File, binEdges, attr, g_func)
         grp = h5File.require_group("all_channels")
-        for state in ds.stateLabels: #hist for each state
+        for state in self.stateLabels: #hist for each state
             binCenters, counts = self.hist(binEdges, attr, state, g_func)
             grp["{}/bin_centers".format(state)] = binCenters
             grp["{}/counts".format(state)] = counts
-        binCenters, counts = ds.hist(binEdges, attr, g_func=g_func) # all states hist
+        binCenters, counts = self.hist(binEdges, attr, g_func=g_func) # all states hist
         grp["bin_centers_ev"]=binCenters
         grp["counts"] = counts
         grp["name_of_energy_indicator"] = attr
+
+    # def qualityCheckLinefit(line, positionToleranceFitSigma, worstAllowedFWHM,
+    #         attr='energy', states=None, dlo=50, dhi=50, binsize=1, binEdges=None,
+    #         guessParams=None, g_func=None, holdvals=None, resolutionPlot=True):
+    #     fitters = self._qualityCheckLinefit(line, positionToleranceFitSigma, worstAllowedFWHM,
+    #                         attr, states, dlo, dhi, binsize, binEdges, guessParams, g_func, holdvals)
+    #     resolutions = np.array([fitter.last_fit_params_dict["resolution"][0]] for fitter in fitters if fitter.success)
+    #     if resolutionPlot:
+    #         plt.figure()
+    #         axis = plt.gca()
+    #         axis.hist(resolutions, bins=np.arange(0, np.amax(resolutions)+0.25,0.25))
+    #         axis.set_xlabel("energy resoluiton fwhm (eV)")
+    #         axis.set_ylabel("# of channels / 0.25 eV bin")
+
+
 
 
 def plotFitters(fitters):
@@ -908,7 +947,17 @@ def plotFitters(fitters):
         else:
             plt.title(type(fitter.spect).__name__)
 
+plt.close("all")
+filename = "/Users/oneilg/Documents/EBIT/data/20181205_BCDEFGHI/20181205_BCDEFGHI_chan1.off"
 data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=4))
+data.experimentStateFile.aliasState("B","Ne")
+data.experimentStateFile.aliasState("C","W 1")
+data.experimentStateFile.aliasState("D","Os")
+data.experimentStateFile.aliasState("E","Ar")
+data.experimentStateFile.aliasState("F","Re")
+data.experimentStateFile.aliasState("G","W 2")
+data.experimentStateFile.aliasState("H","CO2")
+data.experimentStateFile.aliasState("I","Ir")
 data.learnDriftCorrection()
 ds=data.firstGoodChannel()
 ds.plotAvsB("relTimeSec", "residualStdDev",  includeBad=True)
@@ -932,19 +981,6 @@ ds.linefit("Ne He-Like 1s2p",attr="energy",states="B")
 ds.linefit(2181.4,attr="energy",states="C")
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
-# now energy should work
-# calibrationPlan = CalibrationPlan()
-# calibrationPlan.addCalPoint(3404, "Ne He-Like 1s2p", states="B")
-# calibrationPlan.addCalPoint(3768, "Ne H-Like 2p", states="B")
-# calibrationPlan.addCalPoint(7880, 2181.4, states="C", name = "W Ni-8")
-# ds.learnCalibrationRough("filtValueDC",calibrationPlan)
-# fitters = ds.learnCalibration("filtValueDC",calibrationPlan) # overwrites calibrationRough
-
-
-
-
-# aligner =
-
 ds3 = data[3]
 data.alignToReferenceChannel(referenceChannel=ds,
                              binEdges=np.arange(500,20000,4), attr="filtValueDC")
@@ -953,53 +989,11 @@ aligner.samePeaksPlot()
 aligner.samePeaksPlotWithAlignmentCal()
 
 fitters = data.calibrateFollowingPlan("filtValueDC", _rethrow=True)
-fitters = data.lineQualityCheck("Ne H-Like 2p", positionToleranceFitSigma=4, worstAllowedFWHM=4, _rethrow=True)
+fitters = data.qualityCheckLinefit("Ne H-Like 2p", positionToleranceFitSigma=4, worstAllowedFWHM=4.5, _rethrow=True)
 data.hist(np.arange(0,4000,1), "energy")
 data.plotHist(np.arange(0,4000,1),"energy", coAddStates=False)
 data.plotHists(np.arange(0,16000,4),"arbsInRefChannelUnits")
 data.plotHists(np.arange(0,4000,1),"energy")
-
-
-
-
-
-def recipeToHDF5(self,h5File):
-    grp = h5File.require_group(str(self.channum))
-    self.driftCorrection.toHDF5(grp)
-    self.calibration.save_to_hdf5(grp,"calibration")
-    grp["calibration/uncalibratedName"] = self.calibration.uncalibratedName
-    self.calibrationRough.save_to_hdf5(grp,"calibrationRough")
-    grp["calibrationRough/uncalibratedName"] = self.calibrationRough.uncalibratedName
-    self.calibrationArbsInRefChannelUnits.save_to_hdf5(grp,"calibrationArbsInRefChannelUnits")
-    grp["calibrationArbsInRefChannelUnits/uncalibratedName"] = self.calibrationArbsInRefChannelUnits.uncalibratedName
-
-def recipeFromHDF5(self, h5File):
-    grp = h5File.require_group(str(self.channum))
-    self.driftCorrection = DriftCorrection.fromHDF5(grp)
-    self.calibration = mass.EnergyCalibration.load_from_hdf5(grp,"calibration")
-    self.calibration.uncalibratedName = grp["calibration/uncalibratedName"].value
-    self.calibrationRough = mass.EnergyCalibration.load_from_hdf5(grp,"calibrationRough")
-    self.calibrationRough.uncalibratedName = grp["calibrationRough/uncalibratedName"].value
-    self.calibrationArbsInRefChannelUnits =  mass.EnergyCalibration.load_from_hdf5(grp,"calibrationArbsInRefChannelUnits")
-    self.calibrationArbsInRefChannelUnits.uncalibratedName = grp["calibrationArbsInRefChannelUnits/uncalibratedName"].value
-
-def energyTimestampLabelToHDF5(self, h5File):
-    grp = h5File.require_group(str(self.channum))
-    energy = ds.energy
-    unixnano = ds.unixnano
-    if len(ds.stateLabels)>0:
-        for state in ds.stateLabels:
-            g = ds.choose(states=state)
-            grp["{}/energy".format(state)]=energy[g]
-            grp["{}/unixnano".format(state)]=unixnano[g]
-    else:
-        g = ds.choose()
-        grp["{}/energy".format(state)]=energy[g]
-        grp["{}/unixnano".format(state)]=unixnano[g]
-
-Channel.recipeToHDF5 = recipeToHDF5
-Channel.recipeFromHDF5 = recipeFromHDF5
-Channel.energyTimestampLabelToHDF5 = energyTimestampLabelToHDF5
 
 with h5py.File("temp","w") as h5:
     data.histsToHDF5(h5, np.arange(4000))
@@ -1010,8 +1004,8 @@ with h5py.File("temp","r") as h5:
     print(h5.keys())
     newds = Channel(ds.offFile, ds.experimentStateFile)
     newds.recipeFromHDF5(h5)
-# to hdf5
-# timestamp, energy, label
-# drift correction, calibrations
+
 
 plt.show()
+
+# cut fraction plot
