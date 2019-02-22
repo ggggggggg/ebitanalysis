@@ -11,6 +11,7 @@ import progress.bar
 import inspect
 import fastdtw
 import h5py
+import memorised
 
 class ExperimentStateFile():
     def __init__(self, filename=None, offFilename=None, excludeStart = True, excludeEnd = True):
@@ -169,7 +170,7 @@ def _add_group_loop(method):
             except KeyboardInterrupt as e:
                 raise(e)
             except Exception as e:
-                print("\nchannel {} failed with {}".format(channum,e))
+                ds.markBad("{} during {}".format(e,method_name), e)
                 if rethrow:
                     raise
             bar.next()
@@ -294,7 +295,6 @@ class Channel(CorG):
         self.markedBadBool = False
         self._statesDict = None
         self.learnChannumAndShortname()
-        self.learnStdDevResThresholdUsingMedianAbsoluteDeviation()
 
     def learnChannumAndShortname(self):
         basename, self.channum = mass.ljh_util.ljh_basename_channum(self.offFile.filename)
@@ -308,6 +308,7 @@ class Channel(CorG):
         sigma = mad*k
         self.stdDevResThreshold = median+nSigma*sigma
 
+    @_add_group_loop
     def learnStdDevResThresholdUsingRatioToNoiseStd(self, ratioToNoiseStd=1.5):
         self.stdDevResThreshold = self.offFile.header["ModelInfo"]["NoiseStandardDeviation"]*ratioToNoiseStd
 
@@ -362,6 +363,14 @@ class Channel(CorG):
     @property
     def filtValue(self):
         return self.offFile["coefs"][:,2]
+
+    @property
+    def coef3(self):
+        return self.offFile["coefs"][:,3]
+
+    @property
+    def coef4(self):
+        return self.offFile["coefs"][:,4]
 
     @property
     def filtValueDC(self):
@@ -482,8 +491,8 @@ class Channel(CorG):
                 fitter = self.linefit(energy, "energyRough", states, dlo=dlo, dhi=dhi,
                                 plot=False, binsize=binsize)
             fitters.append(fitter)
-            if not fitter.fit_success or np.abs(fitter.last_fit_params_dict["peak_ph"][0]-energy)>10:
-                self.markBad("failed fit", extraInfo = fitter)
+            if not fitter.fit_success:
+                self.markBad("calibrateFollowingPlan: failed fit {}, states {}".format(name,states), extraInfo = fitter)
                 continue
             phRefined = self.calibrationRough.energy2ph(fitter.last_fit_params_dict["peak_ph"][0])
             self.calibration.add_cal_point(phRefined, energy, name)
@@ -499,12 +508,17 @@ class Channel(CorG):
             s+="\nextraInfo: {}".format(extraInfo)
         print(s)
 
+    def markGood(self):
+        self.markedBadReason = None
+        self.markedBadExtraInfo = None
+        self.markedBadBool = False
+
     def plotResidualStdDev(self, axis = None):
         if axis is None:
             plt.figure()
             axis = plt.gca()
         x = np.sort(ds.residualStdDev)/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"]
-        y = np.linspace(0,1,len(self))
+        y = np.linspace(0,1,len(x))
         inds = x>(self.stdDevResThreshold/self.offFile.header["ModelInfo"]["NoiseStandardDeviation"])
         axis.plot(x,y, label="<threshold")
         axis.plot(x[inds], y[inds], "r", label=">threshold")
@@ -514,7 +528,7 @@ class Channel(CorG):
         axis.set_title("{}, {} total pulses, {:0.3f} cut".format(
             self.shortName, len(self), inds.sum()/float(len(self)) ))
         axis.legend()
-        axis.set_xlim(max(0,x[0]), 1.5)
+        axis.set_xlim(max(0,x[0]), 3)
         axis.set_ylim(0,1)
 
     def __len__(self):
@@ -540,7 +554,8 @@ class Channel(CorG):
         return self.aligner
 
     @_add_group_loop
-    def qualityCheckLinefit(self, line, positionToleranceFitSigma, worstAllowedFWHM, attr="energy", states=None,
+    def qualityCheckLinefit(self, line, positionToleranceFitSigma=None, worstAllowedFWHM=None,
+                          positionToleranceAbsolute=None, attr="energy", states=None,
                           dlo=50, dhi=50, binsize=1, binEdges=None, guessParams=None,
                           g_func=None, holdvals=None):
         """calls ds.linefit to fit the given line
@@ -550,12 +565,19 @@ class Channel(CorG):
         fitter = self.linefit(line, attr, states, None, dlo, dhi, binsize, binEdges, False,
                             guessParams, g_func, holdvals)
         fitPos, fitSigma = fitter.last_fit_params_dict["peak_ph"]
-        tolerance = fitSigma*positionToleranceFitSigma
         resolution, _ = fitter.last_fit_params_dict["resolution"]
+        if positionToleranceAbsolute is not None:
+            if positionToleranceFitSigma is not None:
+                raise Exception("specify only one of positionToleranceAbsolute or positionToleranceFitSigma")
+            tolerance = positionToleranceAbsolute
+        elif positionToleranceFitSigma is not None:
+            tolerance = fitSigma*positionToleranceFitSigma
+        else:
+            tolerance = np.inf
         if np.abs(fitPos-fitter.spect.peak_energy)>tolerance:
             self.markBad("qualityCheckLinefit: for {}, want {} within {}, got {}".format(
                 line, fitter.spect.peak_energy, tolerance, fitPos))
-        if resolution>worstAllowedFWHM:
+        if worstAllowedFWHM is not None and resolution>worstAllowedFWHM:
             self.markBad("qualityCheckLinefit: for {}, fit resolution {} > threshold {}".format(
                 line, resolution, worstAllowedFWHM))
         return fitter
@@ -571,6 +593,7 @@ class Channel(CorG):
         grp["counts"] = counts
         grp["name_of_energy_indicator"] = attr
 
+    @_add_group_loop
     def recipeToHDF5(self,h5File):
         grp = h5File.require_group(str(self.channum))
         self.driftCorrection.toHDF5(grp)
@@ -591,6 +614,7 @@ class Channel(CorG):
         self.calibrationArbsInRefChannelUnits =  mass.EnergyCalibration.load_from_hdf5(grp,"calibrationArbsInRefChannelUnits")
         self.calibrationArbsInRefChannelUnits.uncalibratedName = grp["calibrationArbsInRefChannelUnits/uncalibratedName"].value
 
+    @_add_group_loop
     def energyTimestampLabelToHDF5(self, h5File):
         grp = h5File.require_group(str(self.channum))
         energy = ds.energy
@@ -920,18 +944,60 @@ class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
         grp["counts"] = counts
         grp["name_of_energy_indicator"] = attr
 
-    # def qualityCheckLinefit(line, positionToleranceFitSigma, worstAllowedFWHM,
-    #         attr='energy', states=None, dlo=50, dhi=50, binsize=1, binEdges=None,
-    #         guessParams=None, g_func=None, holdvals=None, resolutionPlot=True):
-    #     fitters = self._qualityCheckLinefit(line, positionToleranceFitSigma, worstAllowedFWHM,
-    #                         attr, states, dlo, dhi, binsize, binEdges, guessParams, g_func, holdvals)
-    #     resolutions = np.array([fitter.last_fit_params_dict["resolution"][0]] for fitter in fitters if fitter.success)
-    #     if resolutionPlot:
-    #         plt.figure()
-    #         axis = plt.gca()
-    #         axis.hist(resolutions, bins=np.arange(0, np.amax(resolutions)+0.25,0.25))
-    #         axis.set_xlabel("energy resoluiton fwhm (eV)")
-    #         axis.set_ylabel("# of channels / 0.25 eV bin")
+    def markAllGood(self):
+        with self.includeBad():
+            for (channum, ds) in self.items():
+                ds.markGood()
+
+    def qualityCheckLinefit(self, line, positionToleranceFitSigma=None, worstAllowedFWHM=None, positionToleranceAbsolute=None,
+            attr='energy', states=None, dlo=50, dhi=50, binsize=1, binEdges=None,
+            guessParams=None, g_func=None, holdvals=None, resolutionPlot=True, hdf5Group=None,
+            _rethrow=False):
+        fitters = self._qualityCheckLinefit(line, positionToleranceFitSigma, worstAllowedFWHM, positionToleranceAbsolute,
+                            attr, states, dlo, dhi, binsize, binEdges, guessParams, g_func, holdvals,
+                            _rethrow=_rethrow)
+        resolutions = np.array([fitter.last_fit_params_dict["resolution"][0] for fitter in fitters.values() if fitter.fit_success])
+        if resolutionPlot:
+            plt.figure()
+            axis = plt.gca()
+            axis.hist(resolutions, bins=np.arange(0, np.amax(resolutions)+0.25,0.25))
+            axis.set_xlabel("energy resoluiton fwhm (eV)")
+            axis.set_ylabel("# of channels / 0.25 eV bin")
+            plt.title(self.shortName+" at {}".format(line))
+        if hdf5Group is not None:
+            with self.includeBad():
+                for (channum, ds) in self.items():
+                    grp = hdf5Group.require_group("{}/fits/{}".format(channum,line))
+                    if ds.markedBadBool:
+                        grp["markedBadReason"]=ds.markedBadReason
+                    else:
+                        fitter = fitters[channum]
+                        for (k,(v,err)) in fitter.last_fit_params_dict.items():
+                            grp[k]=v
+                            grp[k+"_err"]=err
+                        grp["states"]=str(states)
+        return fitters
+
+    @property
+    def outputDir(self, baseDir=None):
+        dirname = data.shortName.split(" ")[0]
+        if baseDir is None:
+            baseDir = os.getcwd()
+        d = os.path.join(baseDir, dirname)
+        if not os.path.isdir(d):
+            os.mkdir(d)
+        return d
+
+    @property
+    def outputHDF5(self):
+        if not hasattr(self, "_outputHDF5Filename"):
+            filename = os.path.join(self.outputDir, data.shortName.split(" ")[0]+".hdf5")
+            self._outputHDF5Filename = filename
+            return h5py.File(self._outputHDF5Filename, "w")
+        else:
+            return h5py.File(self._outputHDF5Filename, "a")
+        return self._outputHDF5
+
 
 
 
@@ -949,7 +1015,7 @@ def plotFitters(fitters):
 
 plt.close("all")
 filename = "/Users/oneilg/Documents/EBIT/data/20181205_BCDEFGHI/20181205_BCDEFGHI_chan1.off"
-data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=4))
+data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=240))
 data.experimentStateFile.aliasState("B","Ne")
 data.experimentStateFile.aliasState("C","W 1")
 data.experimentStateFile.aliasState("D","Os")
@@ -958,6 +1024,7 @@ data.experimentStateFile.aliasState("F","Re")
 data.experimentStateFile.aliasState("G","W 2")
 data.experimentStateFile.aliasState("H","CO2")
 data.experimentStateFile.aliasState("I","Ir")
+data.learnStdDevResThresholdUsingRatioToNoiseStd(ratioToNoiseStd=5)
 data.learnDriftCorrection()
 ds=data.firstGoodChannel()
 ds.plotAvsB("relTimeSec", "residualStdDev",  includeBad=True)
@@ -970,15 +1037,21 @@ driftCorrectInfo = ds.learnDriftCorrection()
 ds.plotCompareDriftCorrect()
 
 ds.calibrationPlanInit("filtValueDC")
-ds.calibrationPlanAddPoint(3404, "Ne He-Like 1s2p", states="B")
-ds.calibrationPlanAddPoint(3768, "Ne H-Like 2p", states="B")
-ds.calibrationPlanAddPoint(7880, "W Ni-8", states="C", energy=2181.4)
+ds.calibrationPlanAddPoint(2128, "O He-Like 1s2p + 1s2s", states="CO2")
+ds.calibrationPlanAddPoint(2421, "O H-Like 2p", states="CO2")
+ds.calibrationPlanAddPoint(2864, "O H-Like 3p", states="CO2")
+ds.calibrationPlanAddPoint(3404, "Ne He-Like 1s2p", states="Ne")
+ds.calibrationPlanAddPoint(3768, "Ne H-Like 2p", states="Ne")
+ds.calibrationPlanAddPoint(7641, "W Ni-7", states=["W 1", "W 2"])
+# ds.calibrationPlanAddPoint(7880, "W Ni-8", states=["W 1", "W 2"])
+ds.calibrationPlanAddPoint(11125, "Ar He-Like 1s2s+1s2p", states="Ar")
+ds.calibrationPlanAddPoint(11728, "Ar H-Like 2p 2P1/2+2P3/2", states="Ar")
 # at this point energyRough should work
 ds.plotHist(np.arange(0,4000,1),"energyRough", coAddStates=False)
 fitters = ds.calibrateFollowingPlan("filtValueDC")
-ds.linefit("Ne H-Like 2p",attr="energy",states="B")
-ds.linefit("Ne He-Like 1s2p",attr="energy",states="B")
-ds.linefit(2181.4,attr="energy",states="C")
+ds.linefit("Ne H-Like 2p",attr="energy",states="Ne")
+ds.linefit("Ne He-Like 1s2p",attr="energy",states="Ne")
+ds.linefit("W Ni-7",attr="energy",states=["W 1","W 2"])
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
 ds3 = data[3]
@@ -988,19 +1061,75 @@ aligner = ds3.aligner
 aligner.samePeaksPlot()
 aligner.samePeaksPlotWithAlignmentCal()
 
-fitters = data.calibrateFollowingPlan("filtValueDC", _rethrow=True)
-fitters = data.qualityCheckLinefit("Ne H-Like 2p", positionToleranceFitSigma=4, worstAllowedFWHM=4.5, _rethrow=True)
+fitters = data.calibrateFollowingPlan("filtValueDC", _rethrow=False, dlo=10,dhi=10)
+with data.outputHDF5 as h5:
+    fitters = data.qualityCheckLinefit("Ne H-Like 3p", positionToleranceAbsolute=2,
+                worstAllowedFWHM=4.5, states="Ne", _rethrow=True,
+                resolutionPlot=True, hdf5Group=h5)
+    data.histsToHDF5(h5, np.arange(4000))
+    data.recipeToHDF5(h5)
+    data.energyTimestampLabelToHDF5(h5)
+
 data.hist(np.arange(0,4000,1), "energy")
 data.plotHist(np.arange(0,4000,1),"energy", coAddStates=False)
 data.plotHists(np.arange(0,16000,4),"arbsInRefChannelUnits")
 data.plotHists(np.arange(0,4000,1),"energy")
 
-with h5py.File("temp","w") as h5:
-    data.histsToHDF5(h5, np.arange(4000))
-    ds.recipeToHDF5(h5)
-    ds.energyTimestampLabelToHDF5(h5)
+deltaELocalMaximum = 5
+plt.figure(figsize=(12,6))
+ax = plt.gca()
+data.plotHist(np.arange(1000,4000,1),"energy", coAddStates=False, states=["W 1","Os"], axis=ax)
+ax.set_ylim(0,1.2*np.amax([np.amax(l.get_ydata()) for l in ax.lines]))
+names = ["W Ni-{}".format(i) for i in range(1,27)]
+n = collections.OrderedDict()
+l=ax.lines[0]
+for name in names:
+    n[name] = mass.spectrum_classes[name].nominal_peak_energy
 
-with h5py.File("temp","r") as h5:
+for name, energy in n.items():
+    ydata = np.interp(energy, l.get_xdata(), l.get_ydata())
+    ydataLocalMaximum = np.amax([np.interp(energy+de, l.get_xdata(), l.get_ydata(),
+                           right=0, left=0) for de in np.linspace(-1,1,10)*deltaELocalMaximum ])
+    plt.annotate(name, (energy, ydataLocalMaximum), (energy, ydataLocalMaximum*1.1),
+                 rotation=90, verticalalignment='right', horizontalalignment="center",color="b")
+
+nos = collections.OrderedDict()
+nos["Os Ni-2"]=1680
+nos["Os Ni-3"]=1755
+nos["Os Ni-4"]=1902
+nos["Os Ni-5"]=1975
+nos["Os Ni-6"]=2155
+nos["Os Ni-7"]=2268
+nos["Os Ni-8"]=2342
+nos["Os Ni-16"]=3032
+nos["Os Ni-17"]=3102
+l = ax.lines[1]
+for name, energy in nos.items():
+    ydata = np.interp(energy, l.get_xdata(), l.get_ydata())
+    ydataLocalMaximum = np.amax([np.interp(energy+de, l.get_xdata(), l.get_ydata(),
+                           right=0, left=0) for de in np.linspace(-1,1,10)*deltaELocalMaximum ])
+    plt.annotate(name, (energy, ydataLocalMaximum), (energy, ydataLocalMaximum*1.1), rotation=90, verticalalignment='right', horizontalalignment="center",color="orange")
+
+
+fitters = [ds.linefit("Ne H-Like 3p", plot=False) for ds in data.values()]
+fitter = data.linefit("Ne H-Like 3p", plot=False)
+
+fig=plt.figure(figsize=(12,12))
+fig.suptitle("{} fits to {}".format(data.shortName, "Ne H-Like 3p"))
+fitter.plot(label="full",axis=plt.subplot(2,2,3))
+resolutions = [_f.last_fit_params_dict["resolution"][0] for _f in fitters]
+positions = [_f.last_fit_params_dict["peak_ph"][0] for _f in fitters]
+position_errs = [_f.last_fit_params_dict["peak_ph"][1] for _f in fitters]
+plt.subplot(2,2,1)
+plt.hist(resolutions)
+plt.subplot(2,2,2)
+plt.hist(positions)
+plt.vlines(fitter.spect.peak_energy, plt.ylim()[0], plt.ylim()[1])
+plt.subplot(2,2,4)
+plt.errorbar(np.arange(len(positions)), positions, yerr=position_errs,fmt=".")
+plt.hlines(fitter.spect.peak_energy, plt.xlim()[0], plt.xlim()[1])
+
+with h5py.File(data.outputHDF5.filename,"r") as h5:
     print(h5.keys())
     newds = Channel(ds.offFile, ds.experimentStateFile)
     newds.recipeFromHDF5(h5)
@@ -1009,3 +1138,10 @@ with h5py.File("temp","r") as h5:
 plt.show()
 
 # cut fraction plot
+# energy resolution plot
+# many fits
+# calibration plan plot (mark peaks!)
+# add cal fits
+# compare channel by channel energy resolutions to mass analysis
+# worst spectra stackplot
+# plot residuals vs primary component
