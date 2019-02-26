@@ -629,6 +629,21 @@ class Channel(CorG):
             grp["{}/energy".format(state)]=energy[g]
             grp["{}/unixnano".format(state)]=unixnano[g]
 
+    @_add_group_loop
+    def qualityCheckDropOneErrors(self, thresholdAbsolute = None, thresholdSigmaFromMedianAbsoluteValue = None):
+        energies, errors = self.calibration.drop_one_errors()
+        maxAbsError = np.amax(np.abs(errors))
+        medianAbsoluteValue = np.median(np.abs(errors))
+        k = 1.4826 # https://en.wikipedia.org/wiki/Median_absolute_deviation
+        sigma = k*medianAbsoluteValue
+        if thresholdAbsolute is not None:
+            if maxAbsError > sigma*thresholdSigmaFromMedianAbsoluteValue:
+                self.markBad("qualityCheckDropOneErrors: maximum absolute drop one error {} > theshold {} (thresholdSigmaFromMedianAbsoluteValue)".format(maxAbsError, sigma*thresholdSigmaFromMedianAbsoluteValue))
+        if thresholdAbsolute is not None:
+            if maxAbsError>thresholdAbsolute:
+                self.markBad("qualityCheckDropOneErrors: maximum absolute drop one error {} > theshold {} (thresholdAbsolute)".format(maxAbsError, thresholdAbsolute))
+
+
 
 class AlignBToA():
     cm = plt.cm.gist_ncar
@@ -1033,7 +1048,7 @@ ds.plotAvsB("relTimeSec", "filtValue", includeBad=False)
 ds.plotHist(np.arange(0,40000,4),"filtValue")
 ds.plotHist(np.arange(0,40000,4),"filtValue", coAddStates=False)
 ds.plotResidualStdDev()
-driftCorrectInfo = ds.learnDriftCorrection()
+driftCorrectInfo = ds.learnDriftCorrection(states=["W 1","W 2"])
 ds.plotCompareDriftCorrect()
 
 ds.calibrationPlanInit("filtValueDC")
@@ -1042,8 +1057,11 @@ ds.calibrationPlanAddPoint(2421, "O H-Like 2p", states="CO2")
 ds.calibrationPlanAddPoint(2864, "O H-Like 3p", states="CO2")
 ds.calibrationPlanAddPoint(3404, "Ne He-Like 1s2p", states="Ne")
 ds.calibrationPlanAddPoint(3768, "Ne H-Like 2p", states="Ne")
+ds.calibrationPlanAddPoint(5716, "W Ni-2", states=["W 1", "W 2"])
+ds.calibrationPlanAddPoint(6413, "W Ni-4", states=["W 1", "W 2"])
 ds.calibrationPlanAddPoint(7641, "W Ni-7", states=["W 1", "W 2"])
-# ds.calibrationPlanAddPoint(7880, "W Ni-8", states=["W 1", "W 2"])
+ds.calibrationPlanAddPoint(10256, "W Ni-17", states=["W 1", "W 2"])
+# ds.calibrationPlanAddPoint(10700, "W Ni-20", states=["W 1", "W 2"])
 ds.calibrationPlanAddPoint(11125, "Ar He-Like 1s2s+1s2p", states="Ar")
 ds.calibrationPlanAddPoint(11728, "Ar H-Like 2p 2P1/2+2P3/2", states="Ar")
 # at this point energyRough should work
@@ -1054,6 +1072,25 @@ ds.linefit("Ne He-Like 1s2p",attr="energy",states="Ne")
 ds.linefit("W Ni-7",attr="energy",states=["W 1","W 2"])
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
+def diagnoseCalibration(self):
+    fig = plt.figure(figsize=(20,12))
+    plt.suptitle(self.shortName)
+    n = int(np.ceil(np.sqrt(len(ds.fittersFromCalibrateFollowingPlan)+2)))
+    for i,fitter in enumerate(ds.fittersFromCalibrateFollowingPlan):
+        ax = plt.subplot(n,n,i+1)
+        fitter.plot(axis=ax,label="full")
+        if isinstance(fitter, mass.GaussianFitter):
+            plt.title("GaussianFitter (energy?)")
+        else:
+            plt.title(type(fitter.spect).__name__)
+    ax = plt.subplot(n,n,i+2)
+    ds.calibration.plot(axis=ax)
+    ax = plt.subplot(n,n,i+3)
+    ds.plotHist(np.arange(0,16000,4), ds.calibration.uncalibratedName, axis=ax, coAddStates = False)
+    plt.vlines(ds.calibrationPlan.uncalibratedVals, 0, plt.ylim()[1])
+Channel.diagnoseCalibration = diagnoseCalibration
+ds.diagnoseCalibration()
+
 ds3 = data[3]
 data.alignToReferenceChannel(referenceChannel=ds,
                              binEdges=np.arange(500,20000,4), attr="filtValueDC")
@@ -1062,9 +1099,10 @@ aligner.samePeaksPlot()
 aligner.samePeaksPlotWithAlignmentCal()
 
 fitters = data.calibrateFollowingPlan("filtValueDC", _rethrow=False, dlo=10,dhi=10)
+data.qualityCheckDropOneErrors(thresholdAbsolute=2.5, thresholdSigmaFromMedianAbsoluteValue=6)
 with data.outputHDF5 as h5:
     fitters = data.qualityCheckLinefit("Ne H-Like 3p", positionToleranceAbsolute=2,
-                worstAllowedFWHM=4.5, states="Ne", _rethrow=True,
+                worstAllowedFWHM=4.5, states="Ne", _rethrow=False,
                 resolutionPlot=True, hdf5Group=h5)
     data.histsToHDF5(h5, np.arange(4000))
     data.recipeToHDF5(h5)
@@ -1110,24 +1148,128 @@ for name, energy in nos.items():
                            right=0, left=0) for de in np.linspace(-1,1,10)*deltaELocalMaximum ])
     plt.annotate(name, (energy, ydataLocalMaximum), (energy, ydataLocalMaximum*1.1), rotation=90, verticalalignment='right', horizontalalignment="center",color="orange")
 
+def fitterPlot(data, lineName, states=None):
+    fitters = [ds.linefit(lineName, plot=False, states=states) for ds in data.values()]
+    fitter = data.linefit(lineName, plot=False, states=states)
+    fig=plt.figure(figsize=(12,12))
+    fig.suptitle("{} fits to {} with states = {}".format(data.shortName, lineName, states))
+    fitter.plot(label="full",axis=plt.subplot(2,2,3))
+    plt.xlabel("energy (eV)")
+    plt.ylabel("counts per bin")
+    resolutions = [_f.last_fit_params_dict["resolution"][0] for _f in fitters]
+    positions = [_f.last_fit_params_dict["peak_ph"][0] for _f in fitters]
+    position_errs = [_f.last_fit_params_dict["peak_ph"][1] for _f in fitters]
+    ax=plt.subplot(2,2,1)
+    plt.hist(resolutions)
+    plt.xlabel("resolution (eV fwhm)")
+    plt.ylabel("channels per bin")
+    plt.text(0.5,0.9,"median = {:.2f}".format(np.median(resolutions)),transform = ax.transAxes)
+    plt.vlines(np.median(resolutions), plt.ylim()[0], plt.ylim()[1], label="median")
+    ax=plt.subplot(2,2,2)
+    plt.hist(positions)
+    plt.xlabel("fit position (eV)")
+    plt.ylabel("channels per bin")
+    plt.text(0.5,0.9,"median = {:.2f}\ndb positoin = {:.3f}".format(np.median(positions),
+                            fitter.spect.peak_energy),transform = ax.transAxes)
+    plt.vlines(fitter.spect.peak_energy, plt.ylim()[0], plt.ylim()[1], label="db position")
+    ax=plt.subplot(2,2,4)
+    plt.errorbar(np.arange(len(positions)), positions, yerr=position_errs,fmt=".")
+    plt.hlines(fitter.spect.peak_energy, plt.xlim()[0], plt.xlim()[1], label="db position")
+    plt.legend()
+    plt.xlabel("channel number")
+    plt.ylabel("line position (eV)")
 
-fitters = [ds.linefit("Ne H-Like 3p", plot=False) for ds in data.values()]
-fitter = data.linefit("Ne H-Like 3p", plot=False)
+fitterPlot(data,"W Ni-20", states=["W 1"])
 
-fig=plt.figure(figsize=(12,12))
-fig.suptitle("{} fits to {}".format(data.shortName, "Ne H-Like 3p"))
-fitter.plot(label="full",axis=plt.subplot(2,2,3))
-resolutions = [_f.last_fit_params_dict["resolution"][0] for _f in fitters]
-positions = [_f.last_fit_params_dict["peak_ph"][0] for _f in fitters]
-position_errs = [_f.last_fit_params_dict["peak_ph"][1] for _f in fitters]
-plt.subplot(2,2,1)
-plt.hist(resolutions)
-plt.subplot(2,2,2)
-plt.hist(positions)
-plt.vlines(fitter.spect.peak_energy, plt.ylim()[0], plt.ylim()[1])
-plt.subplot(2,2,4)
-plt.errorbar(np.arange(len(positions)), positions, yerr=position_errs,fmt=".")
-plt.hlines(fitter.spect.peak_energy, plt.xlim()[0], plt.xlim()[1])
+
+lineNames = collections.OrderedDict()
+lineNames["Ne"] = ["Ne He-Like 1s2p", "Ne H-Like 2p"]
+lineNames["W 1"] = ["W Ni-8","W Ni-11","W Ni-16","W Ni-20","W Ni-21","W Ni-23"]
+lineNames["Ar"] = ["Ar He-Like 1s2s+1s2p", "Ar H-Like 2p 2P1/2+2P3/2"]
+lineNames["W 2"] = ["W Ni-8","W Ni-11","W Ni-16","W Ni-20","W Ni-21","W Ni-23"]
+lineNames["CO2"] = ["O He-Like 1s2p + 1s2s", "O H-Like 2p", "O H-Like 3p"]
+lineNames["Ir"] = ["O He-Like 1s2p + 1s2s", "O H-Like 2p", "O H-Like 3p"]
+
+
+
+fitterDict = collections.OrderedDict()
+for state in lineNames.keys():
+    fitterDict[state] = collections.OrderedDict()
+    for lineName in lineNames[state]:
+        fitter = data.linefit(lineName, states=state, plot=False)
+        fitterDict[state][lineName]=fitter
+
+fig=plt.figure(figsize=(12,8))
+for (i,state) in enumerate(lineNames.keys()):
+    for (j,lineName) in enumerate(lineNames[state]):
+        fitter=fitterDict[state][lineName]
+        x=i+float(j)/len(lineNames[state])
+        lines = plt.errorbar(x,fitter.last_fit_params_dict["peak_ph"][0]-fitter.spect.peak_energy,
+                     yerr=fitter.last_fit_params_dict["peak_ph"][1],
+                     label="{}:{}".format(state,lineName),fmt='o')
+        plt.annotate("{}:{}".format(state,lineName), (x,fitter.last_fit_params_dict["peak_ph"][0]-fitter.spect.peak_energy),
+                     rotation=90, verticalalignment='right', horizontalalignment="center", color=lines[0].get_color(),
+                     xytext = (5,10), textcoords='offset points')
+# plt.legend(loc="upper left")
+plt.xlabel("state")
+plt.ylabel("fit energy and uncertainty - database energy (eV)")
+plt.title(data.shortName)
+plt.grid(True)
+plt.xticks(np.arange(len(lineNames.keys())), lineNames.keys())
+
+fig=plt.figure(figsize=(12,8))
+plt.subplot(2,1,1)
+z = np.zeros((ds.calibration.npts, len(data)))
+for (j,ds) in enumerate(data.values()):
+    x,y = ds.calibration.drop_one_errors()
+    plt.plot(x,y,".")
+    for (i,_y) in enumerate(y):
+        z[i,j]=_y
+plt.suptitle(data.shortName)
+plt.grid(True)
+plt.xlabel("energy (eV)")
+plt.ylabel("drop on errors (eV)")
+plt.subplot(2,1,2)
+plt.errorbar(x, np.median(z,axis=1), yerr=np.std(z,axis=1),fmt="o")
+# plt.title(data.shortName)
+plt.grid(True)
+plt.xlabel("energy (eV)")
+plt.ylabel("drop on errors (eV)")
+
+lineNames = collections.OrderedDict()
+lineNames["W 1"] = ["W Ni-{}".format(i) for i in range(1,27)]
+lineNames["W 2"] = ["W Ni-{}".format(i) for i in range(1,27)]
+
+fitterDict = collections.OrderedDict()
+for state in lineNames.keys():
+    fitterDict[state] = collections.OrderedDict()
+    for lineName in lineNames[state]:
+        fitter = data.linefit(lineName, states=state, plot=False)
+        fitterDict[state][lineName]=fitter
+
+fig=plt.figure(figsize=(12,8))
+for (j,lineName) in enumerate(lineNames["W 1"]):
+    fitter=fitterDict["W 1"][lineName]
+    fitter2=fitterDict["W 2"][lineName]
+    x=fitter.spect.peak_energy
+    y = fitter.last_fit_params_dict["peak_ph"][0] - fitter2.last_fit_params_dict["peak_ph"][0]
+    yerr = np.sqrt(fitter.last_fit_params_dict["peak_ph"][1]**2 + fitter2.last_fit_params_dict["peak_ph"][1]**2)
+    lines = plt.errorbar(x,y,
+                 yerr=yerr,
+                 label="{}:{}".format(state,lineName),fmt='o')
+    plt.annotate("{}:{}".format(state,lineName), (x,y),
+                 rotation=90, verticalalignment='right', horizontalalignment="center", color=lines[0].get_color(),
+                 xytext = (5,10), textcoords='offset points')
+# plt.legend(loc="upper left")
+plt.xlabel("energy (eV)")
+plt.ylabel("line position in W1 minus W2 (eV)")
+plt.title(data.shortName)
+plt.grid(True)
+# plt.xticks(np.arange(len(lineNames.keys())), lineNames.keys())
+
+
+
+
 
 with h5py.File(data.outputHDF5.filename,"r") as h5:
     print(h5.keys())
@@ -1135,7 +1277,6 @@ with h5py.File(data.outputHDF5.filename,"r") as h5:
     newds.recipeFromHDF5(h5)
 
 
-plt.show()
 
 # cut fraction plot
 # energy resolution plot
