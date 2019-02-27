@@ -1,6 +1,5 @@
 import mass
 import off
-import ebit
 import devel
 import collections
 import os
@@ -11,7 +10,6 @@ import progress.bar
 import inspect
 import fastdtw
 import h5py
-import memorised
 
 class ExperimentStateFile():
     def __init__(self, filename=None, offFilename=None, excludeStart = True, excludeEnd = True):
@@ -643,6 +641,22 @@ class Channel(CorG):
             if maxAbsError>thresholdAbsolute:
                 self.markBad("qualityCheckDropOneErrors: maximum absolute drop one error {} > theshold {} (thresholdAbsolute)".format(maxAbsError, thresholdAbsolute))
 
+    def diagnoseCalibration(self):
+        fig = plt.figure(figsize=(20,12))
+        plt.suptitle(self.shortName)
+        n = int(np.ceil(np.sqrt(len(ds.fittersFromCalibrateFollowingPlan)+2)))
+        for i,fitter in enumerate(ds.fittersFromCalibrateFollowingPlan):
+            ax = plt.subplot(n,n,i+1)
+            fitter.plot(axis=ax,label="full")
+            if isinstance(fitter, mass.GaussianFitter):
+                plt.title("GaussianFitter (energy?)")
+            else:
+                plt.title(type(fitter.spect).__name__)
+        ax = plt.subplot(n,n,i+2)
+        ds.calibration.plot(axis=ax)
+        ax = plt.subplot(n,n,i+3)
+        ds.plotHist(np.arange(0,16000,4), ds.calibration.uncalibratedName, axis=ax, coAddStates = False)
+        plt.vlines(ds.calibrationPlan.uncalibratedVals, 0, plt.ylim()[1])
 
 
 class AlignBToA():
@@ -857,7 +871,7 @@ class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
         bar = SilenceBar('Parse OFF File Headers', max=len(self.offFileNames), silence=not self.verbose)
         for name in self.offFileNames:
             _, channum = mass.ljh_util.ljh_basename_channum(name)
-            self[channum] = Channel(off.OFFFile(name), self.experimentStateFile)
+            self[channum] = Channel(off.OffFile(name), self.experimentStateFile)
             bar.next()
         bar.finish()
 
@@ -1013,20 +1027,49 @@ class ChannelGroup(CorG, GroupLooper, collections.OrderedDict):
             return h5py.File(self._outputHDF5Filename, "a")
         return self._outputHDF5
 
+    def fitterPlot(self, lineName, states=None):
+        fitters = [ds.linefit(lineName, plot=False, states=states) for ds in self.values()]
+        fitter = self.linefit(lineName, plot=False, states=states)
+        fig=plt.figure(figsize=(12,12))
+        fig.suptitle("{} fits to {} with states = {}".format(self.shortName, lineName, states))
+        fitter.plot(label="full",axis=plt.subplot(2,2,3))
+        plt.xlabel("energy (eV)")
+        plt.ylabel("counts per bin")
+        resolutions = [_f.last_fit_params_dict["resolution"][0] for _f in fitters]
+        positions = [_f.last_fit_params_dict["peak_ph"][0] for _f in fitters]
+        position_errs = [_f.last_fit_params_dict["peak_ph"][1] for _f in fitters]
+        ax=plt.subplot(2,2,1)
+        plt.hist(resolutions)
+        plt.xlabel("resolution (eV fwhm)")
+        plt.ylabel("channels per bin")
+        plt.text(0.5,0.9,"median = {:.2f}".format(np.median(resolutions)),transform = ax.transAxes)
+        plt.vlines(np.median(resolutions), plt.ylim()[0], plt.ylim()[1], label="median")
+        ax=plt.subplot(2,2,2)
+        plt.hist(positions)
+        plt.xlabel("fit position (eV)")
+        plt.ylabel("channels per bin")
+        plt.text(0.5,0.9,"median = {:.2f}\ndb positoin = {:.3f}".format(np.median(positions),
+                                fitter.spect.peak_energy),transform = ax.transAxes)
+        plt.vlines(fitter.spect.peak_energy, plt.ylim()[0], plt.ylim()[1], label="db position")
+        ax=plt.subplot(2,2,4)
+        plt.errorbar(np.arange(len(positions)), positions, yerr=position_errs,fmt=".")
+        plt.hlines(fitter.spect.peak_energy, plt.xlim()[0], plt.xlim()[1], label="db position")
+        plt.legend()
+        plt.xlabel("channel number")
+        plt.ylabel("line position (eV)")
 
-
-
-
-def plotFitters(fitters):
-    fig = plt.figure(figsize=(12,12))
-    n = int(np.ceil(np.sqrt(len(fitters))))
-    for i,fitter in enumerate(fitters):
-        ax = plt.subplot(n,n,i+1)
-        fitter.plot(axis=ax)
-        if isinstance(fitter, mass.GaussianFitter):
-            plt.title("GaussianFitter (energy?)")
-        else:
-            plt.title(type(fitter.spect).__name__)
+def labelPeak(axis, name, energy, line=None, deltaELocalMaximum=5, color=None):
+    if line is None:
+        line = ax.lines[0]
+    if color is None:
+        color = line.get_color()
+    ydataLocalMaximum = np.amax([np.interp(energy+de, line.get_xdata(), line.get_ydata(),
+                       right=0, left=0) for de in np.linspace(-1,1,10)*deltaELocalMaximum ])
+    plt.annotate(name, (energy, ydataLocalMaximum), (0, 10), textcoords='offset points',
+                 rotation=90, verticalalignment='right', horizontalalignment="center",color=color)
+def labelPeaks(axis, names, energies, line=None, deltaELocalMaximum=5, color=None):
+    for name, energy in zip(names, energies):
+        labelPeak(axis, name, energy, line, deltaELocalMaximum, color)
 
 plt.close("all")
 filename = "/Users/oneilg/Documents/EBIT/data/20181205_BCDEFGHI/20181205_BCDEFGHI_chan1.off"
@@ -1072,23 +1115,7 @@ ds.linefit("Ne He-Like 1s2p",attr="energy",states="Ne")
 ds.linefit("W Ni-7",attr="energy",states=["W 1","W 2"])
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
-def diagnoseCalibration(self):
-    fig = plt.figure(figsize=(20,12))
-    plt.suptitle(self.shortName)
-    n = int(np.ceil(np.sqrt(len(ds.fittersFromCalibrateFollowingPlan)+2)))
-    for i,fitter in enumerate(ds.fittersFromCalibrateFollowingPlan):
-        ax = plt.subplot(n,n,i+1)
-        fitter.plot(axis=ax,label="full")
-        if isinstance(fitter, mass.GaussianFitter):
-            plt.title("GaussianFitter (energy?)")
-        else:
-            plt.title(type(fitter.spect).__name__)
-    ax = plt.subplot(n,n,i+2)
-    ds.calibration.plot(axis=ax)
-    ax = plt.subplot(n,n,i+3)
-    ds.plotHist(np.arange(0,16000,4), ds.calibration.uncalibratedName, axis=ax, coAddStates = False)
-    plt.vlines(ds.calibrationPlan.uncalibratedVals, 0, plt.ylim()[1])
-Channel.diagnoseCalibration = diagnoseCalibration
+
 ds.diagnoseCalibration()
 
 ds3 = data[3]
@@ -1113,7 +1140,8 @@ data.plotHist(np.arange(0,4000,1),"energy", coAddStates=False)
 data.plotHists(np.arange(0,16000,4),"arbsInRefChannelUnits")
 data.plotHists(np.arange(0,4000,1),"energy")
 
-deltaELocalMaximum = 5
+
+
 plt.figure(figsize=(12,6))
 ax = plt.gca()
 data.plotHist(np.arange(1000,4000,1),"energy", coAddStates=False, states=["W 1","Os"], axis=ax)
@@ -1123,13 +1151,8 @@ n = collections.OrderedDict()
 l=ax.lines[0]
 for name in names:
     n[name] = mass.spectrum_classes[name].nominal_peak_energy
-
-for name, energy in n.items():
-    ydata = np.interp(energy, l.get_xdata(), l.get_ydata())
-    ydataLocalMaximum = np.amax([np.interp(energy+de, l.get_xdata(), l.get_ydata(),
-                           right=0, left=0) for de in np.linspace(-1,1,10)*deltaELocalMaximum ])
-    plt.annotate(name, (energy, ydataLocalMaximum), (energy, ydataLocalMaximum*1.1),
-                 rotation=90, verticalalignment='right', horizontalalignment="center",color="b")
+labelPeak(ax, "W Ni-8", n["W Ni-8"])
+labelPeaks(axis=ax, names=n.keys(), energies=n.values(), line=ax.lines[0])
 
 nos = collections.OrderedDict()
 nos["Os Ni-2"]=1680
@@ -1141,45 +1164,12 @@ nos["Os Ni-7"]=2268
 nos["Os Ni-8"]=2342
 nos["Os Ni-16"]=3032
 nos["Os Ni-17"]=3102
-l = ax.lines[1]
-for name, energy in nos.items():
-    ydata = np.interp(energy, l.get_xdata(), l.get_ydata())
-    ydataLocalMaximum = np.amax([np.interp(energy+de, l.get_xdata(), l.get_ydata(),
-                           right=0, left=0) for de in np.linspace(-1,1,10)*deltaELocalMaximum ])
-    plt.annotate(name, (energy, ydataLocalMaximum), (energy, ydataLocalMaximum*1.1), rotation=90, verticalalignment='right', horizontalalignment="center",color="orange")
+labelPeaks(ax, names=nos.keys(), energies=nos.values(), line=ax.lines[1])
 
-def fitterPlot(data, lineName, states=None):
-    fitters = [ds.linefit(lineName, plot=False, states=states) for ds in data.values()]
-    fitter = data.linefit(lineName, plot=False, states=states)
-    fig=plt.figure(figsize=(12,12))
-    fig.suptitle("{} fits to {} with states = {}".format(data.shortName, lineName, states))
-    fitter.plot(label="full",axis=plt.subplot(2,2,3))
-    plt.xlabel("energy (eV)")
-    plt.ylabel("counts per bin")
-    resolutions = [_f.last_fit_params_dict["resolution"][0] for _f in fitters]
-    positions = [_f.last_fit_params_dict["peak_ph"][0] for _f in fitters]
-    position_errs = [_f.last_fit_params_dict["peak_ph"][1] for _f in fitters]
-    ax=plt.subplot(2,2,1)
-    plt.hist(resolutions)
-    plt.xlabel("resolution (eV fwhm)")
-    plt.ylabel("channels per bin")
-    plt.text(0.5,0.9,"median = {:.2f}".format(np.median(resolutions)),transform = ax.transAxes)
-    plt.vlines(np.median(resolutions), plt.ylim()[0], plt.ylim()[1], label="median")
-    ax=plt.subplot(2,2,2)
-    plt.hist(positions)
-    plt.xlabel("fit position (eV)")
-    plt.ylabel("channels per bin")
-    plt.text(0.5,0.9,"median = {:.2f}\ndb positoin = {:.3f}".format(np.median(positions),
-                            fitter.spect.peak_energy),transform = ax.transAxes)
-    plt.vlines(fitter.spect.peak_energy, plt.ylim()[0], plt.ylim()[1], label="db position")
-    ax=plt.subplot(2,2,4)
-    plt.errorbar(np.arange(len(positions)), positions, yerr=position_errs,fmt=".")
-    plt.hlines(fitter.spect.peak_energy, plt.xlim()[0], plt.xlim()[1], label="db position")
-    plt.legend()
-    plt.xlabel("channel number")
-    plt.ylabel("line position (eV)")
 
-fitterPlot(data,"W Ni-20", states=["W 1"])
+
+
+data.fitterPlot("W Ni-20", states=["W 1"])
 
 
 lineNames = collections.OrderedDict()
@@ -1275,14 +1265,3 @@ with h5py.File(data.outputHDF5.filename,"r") as h5:
     print(h5.keys())
     newds = Channel(ds.offFile, ds.experimentStateFile)
     newds.recipeFromHDF5(h5)
-
-
-
-# cut fraction plot
-# energy resolution plot
-# many fits
-# calibration plan plot (mark peaks!)
-# add cal fits
-# compare channel by channel energy resolutions to mass analysis
-# worst spectra stackplot
-# plot residuals vs primary component
