@@ -13,23 +13,9 @@ try:
 except:
     d = os.getcwd()
 
-def locateCalPoint(self,lineNameOrEnergy):
-    if isinstance(lineNameOrEnergy, str):
-        name = lineNameOrEnergy
-        if name in mass.spectrum_classes:
-            energy = mass.spectrum_classes[name]().peak_energy
-        elif name in mass.STANDARD_FEATURES:
-            energy = mass.STANDARD_FEATURES[name]
-    else:
-        energy = lineNameOrEnergy
-    ph = self.getRoughCalibration().energy2ph(energy)
-    return ph
-
-mass.off.channels.CalibrationPlan.locateCalPoint = locateCalPoint
-
 plt.close("all")
 filename = "/Users/oneilg/Documents/EBIT/data/20181205_BCDEFGHI/20181205_BCDEFGHI_chan1.off"
-data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=3))
+data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=240))
 data.setOutputDir(baseDir=d, deleteAndRecreate=True)
 
 data.experimentStateFile.aliasState("B","Ne")
@@ -225,59 +211,35 @@ with h5py.File(data.outputHDF5.filename,"r") as h5:
     newds.recipeFromHDF5(h5)
 
 
+
 lineNames = collections.OrderedDict()
 lineNames["W 1"] = ["W Ni-{}".format(i) for i in range(1,27)]
 lineNames["W 2"] = ["W Ni-{}".format(i) for i in range(1,27)]
 
+ds=data[1]
+fitterDict = collections.OrderedDict()
+for state in lineNames.keys():
+    fitterDict[state] = collections.OrderedDict()
+    for lineName in lineNames[state]:
+        fitter = ds.linefit(lineName, states=state, plot=False)
+        fitterDict[state][lineName]=fitter
 
-def choose(self, states=None, good=True):
-    """ return boolean indicies of "choose" pulses
-    if state is none, all states are chosen
-    ds.choose("A") selects state A
-    ds.choose(["A","B"]) selects states A and B
-    """
-    g = self.offFile["residualStdDev"]<self.stdDevResThreshold
-    g = np.logical_and(self.filtValue>500,g)
-    if not good:
-        g = np.logical_not(g)
-    if isinstance(states, str):
-        states = [states]
-    if states is not None:
-        z = np.zeros(self.nRecords,dtype="bool")
-        for state in states:
-            z = np.logical_or(z,self.statesDict[state])
-        g = np.logical_and(g,z)
-    return g
-ds.choose = choose.__get__(ds, Channel)
-
-ds.plotAvsB("filtValue","coef3")
-g = ds.choose()
-x = ds.filtValue[g]
-y = ds.coef3[g]
-pfit3 = np.polyfit(x,y,4)
-_x = np.linspace(0,np.amax(x),100)
-plt.plot(_x, np.polyval(pfit3,_x))
-
-ds.plotAvsB("filtValue","coef4")
-g = ds.choose()
-x = ds.filtValue[g]
-y = ds.coef4[g]
-pfit4 = np.polyfit(x,y,4)
-_x = np.linspace(0,np.amax(x),100)
-plt.plot(_x, np.polyval(pfit4,_x))
-
-ds.plotAvsB("filtValue","derivativeLike")
-g = ds.choose()
-x = ds.filtValue[g]
-y = ds.derivativeLike[g]
-pfitd = np.polyfit(x,y,4)
-_x = np.linspace(0,np.amax(x),100)
-plt.plot(_x, np.polyval(pfitd,_x))
-
-def params(fv):
-    p3 = np.polyval(pfit3, fv)
-    p4 = np.polyval(pfit4, fv)
-    pd = np.polyval(pfitd, fv)
-
-# def recordxy(fv):
-#     p3, p4, pd =
+fig=plt.figure(figsize=(12,8))
+for (j,lineName) in enumerate(lineNames["W 1"]):
+    fitter=fitterDict["W 1"][lineName]
+    fitter2=fitterDict["W 2"][lineName]
+    x=fitter.spect.peak_energy
+    y = fitter.last_fit_params_dict["peak_ph"][0] - fitter2.last_fit_params_dict["peak_ph"][0]
+    yerr = np.sqrt(fitter.last_fit_params_dict["peak_ph"][1]**2 + fitter2.last_fit_params_dict["peak_ph"][1]**2)
+    lines = plt.errorbar(x,y,
+                 yerr=yerr,
+                 label="{}:{}".format(state,lineName),fmt='o')
+    plt.annotate("{}:{}".format(state,lineName), (x,y),
+                 rotation=90, verticalalignment='right', horizontalalignment="center", color=lines[0].get_color(),
+                 xytext = (5,10), textcoords='offset points')
+# plt.legend(loc="upper left")
+plt.xlabel("energy (eV)")
+plt.ylabel("line position in W1 minus W2 (eV)")
+plt.title(ds.shortName)
+plt.grid(True)
+plt.ylim(-3,3)
