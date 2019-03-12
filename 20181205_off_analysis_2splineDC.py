@@ -29,9 +29,8 @@ mass.off.channels.CalibrationPlan.locateCalPoint = locateCalPoint
 
 plt.close("all")
 filename = "/Users/oneilg/Documents/EBIT/data/20181205_BCDEFGHI/20181205_BCDEFGHI_chan1.off"
-data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=240))
-data.setOutputDir(baseDir=d, deleteAndRecreate=True)
-
+data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=4))
+data.setOutputDir(baseDir=d, deleteAndRecreate=True, suffix="_2spline_output")
 data.experimentStateFile.aliasState("B","Ne")
 data.experimentStateFile.aliasState("C","W 1")
 data.experimentStateFile.aliasState("D","Os")
@@ -58,11 +57,15 @@ ds.calibrationPlanAddPoint(2421, "O H-Like 2p", states="CO2")
 ds.calibrationPlanAddPoint(2864, "O H-Like 3p", states="CO2")
 ds.calibrationPlanAddPoint(3404, "Ne He-Like 1s2p", states="Ne")
 ds.calibrationPlanAddPoint(3768, "Ne H-Like 2p", states="Ne")
-ds.calibrationPlanAddPoint(5716, "W Ni-2", states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(6287.8, 'W Ni-Like 3s^2,3p^6,3s^3_3/2,3d^6_5/2,4p_1/2', states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(6413, "W Ni-4", states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(7641, "W Ni-7", states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(10256, "W Ni-17", states=["W 1", "W 2"])
+ds.calibrationPlanAddPoint(5716, "W Ni-2", states="W 1")
+ds.calibrationPlanAddPoint(6287.8, 'W Ni-Like 3s^2,3p^6,3s^3_3/2,3d^6_5/2,4p_1/2', states="W 1")
+ds.calibrationPlanAddPoint(6413, "W Ni-4", states="W 1")
+ds.calibrationPlanAddPoint(7641, "W Ni-7", states="W 1")
+ds.calibrationPlanAddPoint(10256, "W Ni-17", states="W 1")
+# ds.calibrationPlanAddPoint(6287.8, 'W Ni-Like 3s^2,3p^6,3s^3_3/2,3d^6_5/2,4p_1/2', states="W 2")
+# ds.calibrationPlanAddPoint(6413, "W Ni-4", states="W 2")
+# ds.calibrationPlanAddPoint(7641, "W Ni-7", states="W 2")
+# ds.calibrationPlanAddPoint(10256, "W Ni-17", states="W 2")
 # ds.calibrationPlanAddPoint(10700, "W Ni-20", states=["W 1", "W 2"])
 ds.calibrationPlanAddPoint(11125, "Ar He-Like 1s2s+1s2p", states="Ar")
 ds.calibrationPlanAddPoint(11728, "Ar H-Like 2p", states="Ar")
@@ -71,7 +74,7 @@ ds.plotHist(np.arange(0,4000,1),"energyRough", coAddStates=False)
 fitters = ds.calibrateFollowingPlan("filtValueDC")
 ds.linefit("Ne H-Like 2p",attr="energy",states="Ne")
 ds.linefit("Ne He-Like 1s2p",attr="energy",states="Ne")
-ds.linefit("W Ni-7",attr="energy",states=["W 1","W 2"])
+ds.linefit("W Ni-7",attr="energy",states="W 1")
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
 
@@ -90,8 +93,8 @@ with data.outputHDF5 as h5:
     fitters = data.qualityCheckLinefit("Ne H-Like 3p", positionToleranceAbsolute=2,
                 worstAllowedFWHM=4.5, states="Ne", _rethrow=False,
                 resolutionPlot=True, hdf5Group=h5)
-    data.histsToHDF5(h5, np.arange(0,4000,0.25))
-    data.recipeToHDF5(h5)
+    # data.histsToHDF5(h5, np.arange(0,4000,0.25))
+    # data.recipeToHDF5(h5)
     # data.energyTimestampLabelToHDF5(h5)
 
 data.hist(np.arange(0,4000,1), "energy")
@@ -224,7 +227,7 @@ plt.grid(True)
 with h5py.File(data.outputHDF5.filename,"r") as h5:
     print(h5.keys())
     newds = Channel(ds.offFile, ds.experimentStateFile)
-    newds.recipeFromHDF5(h5)
+    # newds.recipeFromHDF5(h5)
 
 
 lineNames = collections.OrderedDict()
@@ -280,3 +283,145 @@ plt.errorbar(binsizes, peak_ph, peak_ph_sigma,fmt=".")
 plt.xlabel("binsize (eV)")
 plt.ylabel("peak location (eV)")
 plt.title(datasource.shortName+" fit to {}".format(lineName))
+
+ph = ds.calibration._ph
+energies = ds.calibration._energies
+names = ds.calibration._names
+plan = ds.calibrationPlan
+timesdict = {}
+for state in ds.stateLabels:
+    timesdict[state]=np.mean(ds.relTimeSec[ds.choose(states=state)])
+times = [timesdict[state] for state in plan.states]
+
+t0 = timesdict["Ne"]
+t1 = timesdict["CO2"]
+
+
+class Cal2Spline():
+    def __init__(self, t0, t1, s0, s1):
+        self.t0 = t0
+        self.t1 = t1
+        self.s0 = s0
+        self.s1 = s1
+
+    def __call__(self, ph, t):
+        e0 = self.s0(ph)
+        e1 = self.s1(ph)
+        a0 = (self.t1-t)/(self.t1-self.t0)
+        a1 = (t-self.t0)/(self.t1-self.t0)
+        e = a0*e0+a1*e1
+        return e
+
+def cal2spline(t0,t1,s0,s1,ph,t):
+    e0 = s0(ph)
+    e1 = s1(ph)
+    a0 = (t1-t)/(t1-t0)
+    a1 = (t-t0)/(t1-t0)
+    e = a0*e0+a1*e1
+    return e
+
+s0 = ds.calibration
+s1 = lambda x: 0*x
+s2 = Cal2Spline(t0, t1, s0, s1)
+assert(np.abs(s2(1000, t0)-286.37599318810084)<20)
+assert(s2(1000, t1)==0)
+assert(np.abs(cal2spline(t0, t1, s0, s1, 1000, t0)-s2(1000,t0))<1e-7)
+assert(cal2spline(t0, t1, s0, s1, 1000, t1)==0)
+assert(all(plan.energies==energies))
+
+import lmfit
+params = lmfit.Parameters()
+knot_energies = np.linspace(0,np.amax(energies),len(energies)-3)[1:]
+for i,e in enumerate(knot_energies):
+    _ph = ds.calibration.energy2ph(e)
+    params.add("ph0_{}".format(i), _ph, vary=True, max=_ph+100, min=_ph-100)
+params.add("a",1.0)
+params.add("b",1/100.0**2)
+params.add("c",-1/4000.0**3)
+
+def Cal2SplineFromParams(params, t0, t1, knot_energies):
+    c0 = mass.EnergyCalibration(curvetype="gain")
+    c1 = mass.EnergyCalibration(curvetype="gain")
+    a=params["a"].value
+    b=params["b"].value
+    c=params["c"].value
+    for k,p in params.items():
+        if not k.startswith("ph"):
+            continue
+        j,i = map(int,k[2:].split("_"))
+        c0.add_cal_point(p.value,knot_energies[i])
+        poly_energy = a*knot_energies[i] + b*knot_energies[i]**2 + c*knot_energies[i]**3
+        c1.add_cal_point(p.value,poly_energy)
+    return Cal2Spline(t0, t1, c0, c1)
+
+def err(params,ph,energies,times, t0, t1, knot_energies):
+    s2 = Cal2SplineFromParams(params, t0, t1, knot_energies)
+    calc_energies = s2(ph, times)
+    residuals = calc_energies-energies
+    return residuals
+
+result = lmfit.minimize(err, params.copy(), args=(ph, energies, times, t0, t1, knot_energies))
+
+a=result.params["a"].value
+b=result.params["b"].value
+c=result.params["c"].value
+poly_energy = a*knot_energies + b*knot_energies**2 + c*knot_energies**3
+plt.plot(knot_energies, poly_energy-knot_energies, label="b_guess={}".format(params["b"].value))
+
+params["b"].value*=-1
+result2 = lmfit.minimize(err, params.copy(), args=(ph, energies, times, t0, t1, knot_energies))
+
+a2=result2.params["a"].value
+b2=result2.params["b"].value
+c2=result2.params["c"].value
+poly_energy2 = a2*knot_energies + b2*knot_energies**2 + c2*knot_energies**3
+plt.plot(knot_energies, poly_energy2-knot_energies, label="b_guess={}".format(params["b"].value))
+plt.legend()
+
+s2 = Cal2SplineFromParams(result.params, t0, t1, knot_energies)
+
+ds.energyCal2Spline = s2(ds.filtValueDC, ds.relTimeSec)
+
+
+def calibrate2Spline(self):
+    ph = self.calibration._ph
+    energies = self.calibration._energies
+    names = self.calibration._names
+    plan = self.calibrationPlan
+    timesdict = {}
+    for state in self.stateLabels:
+        timesdict[state]=np.mean(self.relTimeSec[self.choose(states=state)])
+    times = [timesdict[state] for state in plan.states]
+    t0 = timesdict["Ne"]
+    t1 = timesdict["CO2"]
+
+    def err(params,ph,energies,times, t0, t1, knot_energies):
+        s2 = Cal2SplineFromParams(params, t0, t1, knot_energies)
+        calc_energies = s2(ph, times)
+        residuals = calc_energies-energies
+        return residuals
+
+    params = lmfit.Parameters()
+    knot_energies = np.linspace(0,np.amax(energies),len(energies)-3)[1:]
+    for i,e in enumerate(knot_energies):
+        _ph = self.calibration.energy2ph(e)
+        params.add("ph0_{}".format(i), _ph, vary=True, max=_ph+100, min=_ph-100)
+    params.add("a",1.0)
+    params.add("b",1/100.0**2)
+    params.add("c",-1/4000.0**3)
+
+    result = lmfit.minimize(err, params.copy(), args=(ph, energies, times, t0, t1, knot_energies))
+    s2 = Cal2SplineFromParams(result.params, t0, t1, knot_energies)
+    self.calibration2Spline = s2
+    self.energyCal2Spline = s2(self.filtValueDC, self.relTimeSec)
+
+Channel.calibrate2Spline = calibrate2Spline
+
+for ds in data.values():
+    ds.calibrate2Spline()
+
+plt.figure(figsize=(12,10))
+ax1 = plt.subplot(2,1,1)
+data.plotHists(np.arange(4000), "energy", axis=ax1)
+ax2 = plt.subplot(2,1,2,sharex=ax1)
+data.plotHists(np.arange(4000), "energyCal2Spline", axis=ax2)

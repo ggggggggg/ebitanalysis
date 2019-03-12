@@ -29,9 +29,8 @@ mass.off.channels.CalibrationPlan.locateCalPoint = locateCalPoint
 
 plt.close("all")
 filename = "/Users/oneilg/Documents/EBIT/data/20181205_BCDEFGHI/20181205_BCDEFGHI_chan1.off"
-data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=240))
-data.setOutputDir(baseDir=d, deleteAndRecreate=True)
-
+data = ChannelGroup(getOffFileListFromOneFile(filename, maxChans=244))
+data.setOutputDir(baseDir=d, deleteAndRecreate=True, suffix="_2spline_output")
 data.experimentStateFile.aliasState("B","Ne")
 data.experimentStateFile.aliasState("C","W 1")
 data.experimentStateFile.aliasState("D","Os")
@@ -52,17 +51,78 @@ ds.plotResidualStdDev()
 driftCorrectInfo = ds.learnDriftCorrection(states=["W 1","W 2"])
 ds.plotCompareDriftCorrect()
 
-ds.calibrationPlanInit("filtValueDC")
+import scipy as sp
+import lmfit
+
+@mass.off.add_group_loop
+def learnTDC(self):
+    g = self.choose(states=["W 1","W 2"])
+    indicator0 = self.relTimeSec[g]
+    uncorrected = self.filtValueDC[g]
+    limit = None
+    indicator_median = np.median(indicator0)
+    indicator = indicator0-indicator_median
+
+    if limit is None:
+        pct99 = sp.stats.scoreatpercentile(uncorrected, 99)
+        limit = 1.25 * pct99
+
+    smoother = mass.analysis_algorithms.HistogramSmoother(0.5, [0, limit])
+
+    def entropy(slope):
+        corrected = uncorrected * (1+indicator*slope)
+        hsmooth = smoother(corrected)
+        w = hsmooth > 0
+        return -(np.log(hsmooth[w])*hsmooth[w]).sum()
+
+    slope = sp.optimize.brent(entropy, brack=[0, .001])
+
+    def gain_correct2(params, indicator, uncorrected):
+        a = params["a"].value
+        b = params["b"].value
+        c = params["c"].value
+        gain = (1+indicator*a) * (1+(uncorrected-c)*b)
+        corrected = gain*uncorrected
+        return corrected
+
+    def entropy2(params):
+        corrected = gain_correct2(params, indicator, uncorrected)
+        hsmooth = smoother(corrected)
+        w = hsmooth > 0
+        return -(np.log(hsmooth[w])*hsmooth[w]).sum()
+
+    params = lmfit.Parameters()
+    params.add("a", -slope)
+    params.add("b", 1/(1000.0*np.median(uncorrected)))
+    params.add("c", np.median(uncorrected))
+
+
+    result = lmfit.minimize(entropy2, params, method="nelder")
+
+    corrected = gain_correct2(params, indicator, uncorrected)
+
+    self.filtValueTDCParams = params
+    self.filtValueTDC = gain_correct2(params, self.relTimeSec, self.filtValueDC)
+    return params
+Channel.learnTDC = learnTDC
+
+data.learnTDC()
+
+ds.calibrationPlanInit("filtValueTDC")
 ds.calibrationPlanAddPoint(2128, "O He-Like 1s2p + 1s2s", states="CO2")
 ds.calibrationPlanAddPoint(2421, "O H-Like 2p", states="CO2")
 ds.calibrationPlanAddPoint(2864, "O H-Like 3p", states="CO2")
 ds.calibrationPlanAddPoint(3404, "Ne He-Like 1s2p", states="Ne")
 ds.calibrationPlanAddPoint(3768, "Ne H-Like 2p", states="Ne")
-ds.calibrationPlanAddPoint(5716, "W Ni-2", states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(6287.8, 'W Ni-Like 3s^2,3p^6,3s^3_3/2,3d^6_5/2,4p_1/2', states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(6413, "W Ni-4", states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(7641, "W Ni-7", states=["W 1", "W 2"])
-ds.calibrationPlanAddPoint(10256, "W Ni-17", states=["W 1", "W 2"])
+ds.calibrationPlanAddPoint(5716, "W Ni-2", states="W 1")
+ds.calibrationPlanAddPoint(6287.8, 'W Ni-Like 3s^2,3p^6,3s^3_3/2,3d^6_5/2,4p_1/2', states="W 1")
+ds.calibrationPlanAddPoint(6413, "W Ni-4", states="W 1")
+ds.calibrationPlanAddPoint(7641, "W Ni-7", states="W 1")
+ds.calibrationPlanAddPoint(10256, "W Ni-17", states="W 1")
+# ds.calibrationPlanAddPoint(6287.8, 'W Ni-Like 3s^2,3p^6,3s^3_3/2,3d^6_5/2,4p_1/2', states="W 2")
+# ds.calibrationPlanAddPoint(6413, "W Ni-4", states="W 2")
+# ds.calibrationPlanAddPoint(7641, "W Ni-7", states="W 2")
+# ds.calibrationPlanAddPoint(10256, "W Ni-17", states="W 2")
 # ds.calibrationPlanAddPoint(10700, "W Ni-20", states=["W 1", "W 2"])
 ds.calibrationPlanAddPoint(11125, "Ar He-Like 1s2s+1s2p", states="Ar")
 ds.calibrationPlanAddPoint(11728, "Ar H-Like 2p", states="Ar")
@@ -71,7 +131,7 @@ ds.plotHist(np.arange(0,4000,1),"energyRough", coAddStates=False)
 fitters = ds.calibrateFollowingPlan("filtValueDC")
 ds.linefit("Ne H-Like 2p",attr="energy",states="Ne")
 ds.linefit("Ne He-Like 1s2p",attr="energy",states="Ne")
-ds.linefit("W Ni-7",attr="energy",states=["W 1","W 2"])
+ds.linefit("W Ni-7",attr="energy",states="W 1")
 ds.plotHist(np.arange(0,4000,4),"energy", coAddStates=False)
 
 
@@ -79,19 +139,19 @@ ds.diagnoseCalibration()
 
 ds3 = data[3]
 data.alignToReferenceChannel(referenceChannel=ds,
-                             binEdges=np.arange(500,20000,4), attr="filtValueDC")
+                             binEdges=np.arange(500,20000,4), attr="filtValueTDC")
 aligner = ds3.aligner
 aligner.samePeaksPlot()
 aligner.samePeaksPlotWithAlignmentCal()
 
-fitters = data.calibrateFollowingPlan("filtValueDC", _rethrow=False, dlo=10,dhi=10)
+fitters = data.calibrateFollowingPlan("filtValueTDC", _rethrow=False, dlo=10,dhi=10)
 data.qualityCheckDropOneErrors(thresholdAbsolute=2.5, thresholdSigmaFromMedianAbsoluteValue=6)
 with data.outputHDF5 as h5:
     fitters = data.qualityCheckLinefit("Ne H-Like 3p", positionToleranceAbsolute=2,
                 worstAllowedFWHM=4.5, states="Ne", _rethrow=False,
                 resolutionPlot=True, hdf5Group=h5)
-    data.histsToHDF5(h5, np.arange(0,4000,0.25))
-    data.recipeToHDF5(h5)
+    # data.histsToHDF5(h5, np.arange(0,4000,0.25))
+    # data.recipeToHDF5(h5)
     # data.energyTimestampLabelToHDF5(h5)
 
 data.hist(np.arange(0,4000,1), "energy")
@@ -217,6 +277,30 @@ plt.title(data.shortName)
 plt.grid(True)
 # plt.xticks(np.arange(len(lineNames.keys())), lineNames.keys())
 
+xs=[]
+ys=[]
+fig=plt.figure(figsize=(12,8))
+for (j,lineName) in enumerate(lineNames["W 1"]):
+    fitter=fitterDict["W 1"][lineName]
+    fitter2=fitterDict["W 2"][lineName]
+    x=fitter.spect.peak_energy
+    y = fitter.last_fit_params_dict["peak_ph"][0]/fitter2.last_fit_params_dict["peak_ph"][0]
+    xs.append(x)
+    ys.append(y)
+    # yerr = np.sqrt(fitter.last_fit_params_dict["peak_ph"][1]**2 + fitter2.last_fit_params_dict["peak_ph"][1]**2)
+    lines = plt.plot(x,y,"o",                 label="{}:{}".format(state,lineName))
+    plt.annotate("{}:{}".format(state,lineName), (x,y),
+                 rotation=90, verticalalignment='right', horizontalalignment="center", color=lines[0].get_color(),
+                 xytext = (5,10), textcoords='offset points')
+# plt.legend(loc="upper left")
+plt.xlabel("energy (eV)")
+plt.ylabel("line positions ratio W1/W2 (eV)")
+plt.title(data.shortName)
+plt.grid(True)
+# plt.xticks(np.arange(len(lineNames.keys())), lineNames.keys())
+pfit = np.polyfit(xs,ys,1)
+ys_pfit = np.polyval(pfit,xs)
+plt.plot(xs,ys_pfit)
 
 
 
@@ -224,7 +308,7 @@ plt.grid(True)
 with h5py.File(data.outputHDF5.filename,"r") as h5:
     print(h5.keys())
     newds = Channel(ds.offFile, ds.experimentStateFile)
-    newds.recipeFromHDF5(h5)
+    # newds.recipeFromHDF5(h5)
 
 
 lineNames = collections.OrderedDict()
